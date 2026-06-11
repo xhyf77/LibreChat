@@ -563,7 +563,7 @@ function shutdownCodexCliTerminal() {
   }
 }
 
-function handleWsConnection(ws, params) {
+function handleWsConnection(ws, _request, params) {
   const { userId, sessionId, mode, cols, rows } = params;
   let session;
   try {
