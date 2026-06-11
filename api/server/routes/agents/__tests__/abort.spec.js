@@ -322,6 +322,104 @@ describe('Agent Abort Endpoint', () => {
       });
     });
 
+    describe('Abort Target Resolution', () => {
+      it('should return 400 when no explicit streamId or valid conversationId is provided', async () => {
+        mockGenerationJobManager.getActiveJobIdsForUser.mockResolvedValue(['stream-a', 'stream-b']);
+
+        const response = await request(app).post('/api/agents/chat/abort').send({});
+
+        expect(response.status).toBe(400);
+        expect(response.body).toEqual({ error: 'Missing abort target' });
+        expect(mockGenerationJobManager.getActiveJobIdsForUser).not.toHaveBeenCalled();
+        expect(mockGenerationJobManager.abortJob).not.toHaveBeenCalled();
+      });
+
+      it('should return 400 when conversationId is the new-conversation placeholder', async () => {
+        mockGenerationJobManager.getActiveJobIdsForUser.mockResolvedValue(['stream-a']);
+
+        const response = await request(app)
+          .post('/api/agents/chat/abort')
+          .send({ conversationId: 'new' });
+
+        expect(response.status).toBe(400);
+        expect(response.body).toEqual({ error: 'Missing abort target' });
+        expect(mockGenerationJobManager.getActiveJobIdsForUser).not.toHaveBeenCalled();
+        expect(mockGenerationJobManager.abortJob).not.toHaveBeenCalled();
+      });
+
+      it('should not abort the first active job when a conversationId target has multiple matches', async () => {
+        mockGenerationJobManager.getJob
+          .mockResolvedValueOnce(null)
+          .mockResolvedValueOnce({
+            metadata: { userId: 'test-user-123', conversationId: 'conv-123' },
+          })
+          .mockResolvedValueOnce({
+            metadata: { userId: 'test-user-123', conversationId: 'conv-123' },
+          });
+        mockGenerationJobManager.getActiveJobIdsForUser.mockResolvedValue(['stream-a', 'stream-b']);
+
+        const response = await request(app)
+          .post('/api/agents/chat/abort')
+          .send({ conversationId: 'conv-123' });
+
+        expect(response.status).toBe(409);
+        expect(response.body).toEqual({
+          error: 'Ambiguous abort target',
+          conversationId: 'conv-123',
+        });
+        expect(mockGenerationJobManager.abortJob).not.toHaveBeenCalled();
+      });
+
+      it('should not abort the first active job when a conversationId target has no active match', async () => {
+        mockGenerationJobManager.getJob
+          .mockResolvedValueOnce(null)
+          .mockResolvedValueOnce({
+            metadata: { userId: 'test-user-123', conversationId: 'other-conv-a' },
+          })
+          .mockResolvedValueOnce({
+            metadata: { userId: 'test-user-123', conversationId: 'other-conv-b' },
+          });
+        mockGenerationJobManager.getActiveJobIdsForUser.mockResolvedValue(['stream-a', 'stream-b']);
+
+        const response = await request(app)
+          .post('/api/agents/chat/abort')
+          .send({ conversationId: 'conv-123' });
+
+        expect(response.status).toBe(404);
+        expect(response.body).toEqual({
+          error: 'Job not found',
+          streamId: 'conv-123',
+        });
+        expect(mockGenerationJobManager.abortJob).not.toHaveBeenCalled();
+      });
+
+      it('should abort the only active job matching a valid conversationId target', async () => {
+        mockGenerationJobManager.getJob
+          .mockResolvedValueOnce(null)
+          .mockResolvedValueOnce({
+            metadata: { userId: 'test-user-123', conversationId: 'conv-123' },
+          })
+          .mockResolvedValueOnce({
+            metadata: { userId: 'test-user-123', conversationId: 'other-conv' },
+          });
+        mockGenerationJobManager.getActiveJobIdsForUser.mockResolvedValue(['stream-a', 'stream-b']);
+        mockGenerationJobManager.abortJob.mockResolvedValue({
+          success: true,
+          jobData: null,
+          content: [],
+          text: '',
+        });
+
+        const response = await request(app)
+          .post('/api/agents/chat/abort')
+          .send({ conversationId: 'conv-123' });
+
+        expect(response.status).toBe(200);
+        expect(response.body).toEqual({ success: true, aborted: 'stream-a' });
+        expect(mockGenerationJobManager.abortJob).toHaveBeenCalledWith('stream-a');
+      });
+    });
+
     describe('Job Not Found', () => {
       it('should return 404 when job is not found', async () => {
         mockGenerationJobManager.getJob.mockResolvedValue(null);

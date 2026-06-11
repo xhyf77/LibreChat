@@ -1,10 +1,16 @@
 import { useEffect, useRef } from 'react';
 import { useSetRecoilState, useRecoilValue, useRecoilCallback } from 'recoil';
-import { Constants, tMessageSchema, isAssistantsEndpoint } from 'librechat-data-provider';
+import { useQueryClient, type QueryClient } from '@tanstack/react-query';
+import {
+  Constants,
+  QueryKeys,
+  tMessageSchema,
+  isAssistantsEndpoint,
+} from 'librechat-data-provider';
 import type { TMessage, TConversation, TSubmission, Agents } from 'librechat-data-provider';
-import type { StreamStatusResponse } from '~/data-provider';
+import type { ActiveJobsResponse, StreamStatusResponse } from '~/data-provider';
 import { getBranchSiblingIndexesForTarget } from '~/utils';
-import { useStreamStatus } from '~/data-provider';
+import { streamStatusQueryKey, useStreamStatus } from '~/data-provider';
 import store from '~/store';
 
 function hasSubmissionUserMessage(
@@ -80,6 +86,27 @@ function getResumeBranchTargetMessageId(
 
 function preferDefinedString(value?: string | null, fallback?: string): string | undefined {
   return value != null && value !== '' ? value : fallback;
+}
+
+function hasCachedActiveJob(queryClient: QueryClient, conversationId: string | undefined): boolean {
+  if (!conversationId) {
+    return false;
+  }
+
+  const activeJobs = queryClient.getQueryData<ActiveJobsResponse>([QueryKeys.activeJobs]);
+  return activeJobs?.activeJobIds?.includes(conversationId) === true;
+}
+
+function refreshCompletedStreamQueries(queryClient: QueryClient, conversationId: string) {
+  queryClient.setQueryData<ActiveJobsResponse>([QueryKeys.activeJobs], (old) => ({
+    activeJobIds: (old?.activeJobIds ?? []).filter((jobId) => jobId !== conversationId),
+  }));
+
+  queryClient.invalidateQueries({ queryKey: [QueryKeys.messages, conversationId] });
+  queryClient.invalidateQueries({ queryKey: [QueryKeys.messages, Constants.NEW_CONVO] });
+  queryClient.invalidateQueries({ queryKey: [QueryKeys.conversation, conversationId] });
+  queryClient.invalidateQueries({ queryKey: [QueryKeys.allConversations] });
+  queryClient.invalidateQueries({ queryKey: streamStatusQueryKey(conversationId) });
 }
 
 /**
@@ -180,6 +207,7 @@ export default function useResumeOnLoad(
   runIndex = 0,
   messagesLoaded = true,
 ) {
+  const queryClient = useQueryClient();
   const setSubmission = useSetRecoilState(store.submissionByIndex(runIndex));
   const currentSubmission = useRecoilValue(store.submissionByIndex(runIndex));
   const currentConversation = useRecoilValue(store.conversationByIndex(runIndex));
@@ -217,14 +245,16 @@ export default function useResumeOnLoad(
     !!currentSubmission && (hasExplicitSubmissionMatch || hasHydratedMessageMatch);
   const hasStaleSubmissionForDifferentConvo =
     !!currentSubmission && submissionConvoId != null && submissionConvoId !== conversationId;
+  const hadCachedActiveJobForThisConvo = hasCachedActiveJob(queryClient, conversationId);
+  const resumeStreamId = (currentSubmission as (TSubmission & { resumeStreamId?: string }) | null)
+    ?.resumeStreamId;
+  const hasResumeSubmissionForThisConvo = !!resumeStreamId && hasActiveSubmissionForThisConvo;
 
   const shouldCheck =
     resumableEnabled &&
     messagesLoaded && // Wait for messages to load before checking
-    !hasActiveSubmissionForThisConvo && // Allow if no submission or a confirmed stale submission
     !!conversationId &&
-    conversationId !== Constants.NEW_CONVO &&
-    processedConvoRef.current !== conversationId; // Don't re-check processed convos
+    conversationId !== Constants.NEW_CONVO;
 
   const {
     data: streamStatus,
@@ -243,6 +273,8 @@ export default function useResumeOnLoad(
       isFetching,
       streamStatusActive: streamStatus?.active,
       streamStatusStreamId: streamStatus?.streamId,
+      hadCachedActiveJobForThisConvo,
+      hasResumeSubmissionForThisConvo,
       processedConvoRef: processedConvoRef.current,
     });
 
@@ -254,15 +286,6 @@ export default function useResumeOnLoad(
     // Wait for messages to load to avoid race condition where sync overwrites then DB overwrites
     if (!messagesLoaded) {
       console.log('[ResumeOnLoad] Waiting for messages to load');
-      return;
-    }
-
-    // Don't resume if we already have an active submission FOR THIS CONVERSATION
-    // A stale submission with undefined/different conversationId should not block us
-    if (hasActiveSubmissionForThisConvo) {
-      console.log('[ResumeOnLoad] Skipping - already have active submission for this conversation');
-      // Mark as processed so we don't try again
-      processedConvoRef.current = conversationId;
       return;
     }
 
@@ -284,6 +307,16 @@ export default function useResumeOnLoad(
       return;
     }
 
+    if (streamStatus.active && hasActiveSubmissionForThisConvo) {
+      console.log('[ResumeOnLoad] Skipping - active submission still has active stream status', {
+        streamId: streamStatus.streamId,
+        currentConvoId: conversationId,
+        userMessageId: currentSubmission?.userMessage?.messageId,
+      });
+      processedConvoRef.current = conversationId;
+      return;
+    }
+
     if (
       streamStatus.active &&
       streamStatus.streamId &&
@@ -299,15 +332,23 @@ export default function useResumeOnLoad(
       return;
     }
 
-    // Don't process the same conversation twice
-    if (processedConvoRef.current === conversationId) {
-      console.log('[ResumeOnLoad] Skipping - already processed this conversation');
+    if (!streamStatus.active || !streamStatus.streamId) {
+      console.log('[ResumeOnLoad] No active job to resume for:', conversationId);
+      if (hadCachedActiveJobForThisConvo || hasResumeSubmissionForThisConvo) {
+        console.log('[ResumeOnLoad] Refreshing completed stream data for:', conversationId);
+        refreshCompletedStreamQueries(queryClient, conversationId);
+        if (hasResumeSubmissionForThisConvo) {
+          setSubmission(null);
+        }
+      }
+      processedConvoRef.current = conversationId;
       return;
     }
 
-    if (!streamStatus.active || !streamStatus.streamId) {
-      console.log('[ResumeOnLoad] No active job to resume for:', conversationId);
-      processedConvoRef.current = conversationId;
+    // Don't process the same conversation twice. Completed/inactive streams are
+    // handled above so a job that finishes after navigation still refreshes.
+    if (processedConvoRef.current === conversationId) {
+      console.log('[ResumeOnLoad] Skipping - already processed this conversation');
       return;
     }
 
@@ -359,6 +400,8 @@ export default function useResumeOnLoad(
     messagesLoaded,
     hasActiveSubmissionForThisConvo,
     submissionConvoId,
+    hadCachedActiveJobForThisConvo,
+    hasResumeSubmissionForThisConvo,
     hasStaleSubmissionForDifferentConvo,
     currentSubmission,
     isSuccess,
@@ -367,6 +410,7 @@ export default function useResumeOnLoad(
     getMessages,
     setSubmission,
     restoreResumeBranch,
+    queryClient,
   ]);
 
   // Reset processedConvoRef when conversation changes to allow re-checking

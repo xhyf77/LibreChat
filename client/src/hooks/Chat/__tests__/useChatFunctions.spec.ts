@@ -1,8 +1,10 @@
-import type { TMessage } from 'librechat-data-provider';
+import { EModelEndpoint, type TMessage } from 'librechat-data-provider';
 import {
   getRegenerateSubmissionMessages,
   getPreliminaryRegenerateResponseMessageId,
   getRegenerateTargetResponseMessage,
+  hasPendingAssistantParent,
+  normalizeEndpointType,
 } from '../useChatFunctions';
 
 const userMessage = (messageId: string, parentMessageId = '00000000-0000-0000-0000-000000000000') =>
@@ -22,6 +24,59 @@ const assistantMessage = (messageId: string, parentMessageId: string) =>
     sender: 'Assistant',
     text: messageId,
   }) as TMessage;
+
+describe('normalizeEndpointType', () => {
+  it('keeps valid endpoint types unchanged', () => {
+    expect(normalizeEndpointType('codex-review', EModelEndpoint.custom)).toBe(
+      EModelEndpoint.custom,
+    );
+    expect(normalizeEndpointType(EModelEndpoint.agents, EModelEndpoint.agents)).toBe(
+      EModelEndpoint.agents,
+    );
+  });
+
+  it('treats a custom endpoint name copied into endpointType as custom', () => {
+    expect(normalizeEndpointType('codex-review', 'codex-review')).toBe(EModelEndpoint.custom);
+  });
+
+  it('defaults unknown direct endpoints to the custom endpoint type', () => {
+    expect(normalizeEndpointType('codex-review')).toBe(EModelEndpoint.custom);
+  });
+});
+
+describe('hasPendingAssistantParent', () => {
+  it('treats an empty underscore assistant as pending', () => {
+    expect(
+      hasPendingAssistantParent({
+        ...assistantMessage('assistant-1_', 'user-1'),
+        text: '',
+        content: [],
+      } as TMessage),
+    ).toBe(true);
+  });
+
+  it('does not treat a completed underscore assistant with content as pending', () => {
+    expect(
+      hasPendingAssistantParent({
+        ...assistantMessage('assistant-1_', 'user-1'),
+        text: 'Final answer',
+        content: [{ type: 'text', text: 'Final answer' }],
+        unfinished: false,
+      } as TMessage),
+    ).toBe(false);
+  });
+
+  it('still treats an unfinished progress assistant as pending', () => {
+    expect(
+      hasPendingAssistantParent({
+        ...assistantMessage('assistant-1_', 'user-1'),
+        text: 'Codex Review is still working...',
+        content: [{ type: 'text', text: 'Codex Review is still working...' }],
+        unfinished: true,
+      } as TMessage),
+    ).toBe(true);
+  });
+});
 
 describe('regenerate response targeting', () => {
   it('uses the clicked assistant response instead of the conversation tail', () => {

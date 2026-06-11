@@ -31,7 +31,7 @@ const usernameSchema = z
   });
 
 const loginSchema = z.object({
-  email: z.string().email(),
+  email: z.union([z.string().email(), usernameSchema]),
   password: z
     .string()
     .min(MIN_PASSWORD_LENGTH)

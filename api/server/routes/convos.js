@@ -20,6 +20,11 @@ const { forkConversation, duplicateConversation } = require('~/server/utils/impo
 const { storage, importFileFilter } = require('~/server/routes/files/multer');
 const requireJwtAuth = require('~/server/middleware/requireJwtAuth');
 const { importConversations } = require('~/server/utils/import');
+const {
+  abortCodexReviewJobs,
+  deleteSidecarTasksByConversation,
+  findCodexReviewConversationIds,
+} = require('~/server/services/CodexReview/cleanup');
 const getLogStores = require('~/cache/getLogStores');
 const db = require('~/models');
 
@@ -114,6 +119,7 @@ router.get('/gen_title/:conversationId', async (req, res) => {
 router.delete('/', async (req, res) => {
   let filter = {};
   const { conversationId, source, thread_id, endpoint } = req.body?.arg ?? {};
+  let codexReviewConversationIds = [];
 
   // Prevent deletion of all conversations
   if (!conversationId && !source && !thread_id && !endpoint) {
@@ -126,6 +132,20 @@ router.delete('/', async (req, res) => {
     filter = { conversationId };
   } else if (source === 'button') {
     return res.status(200).send('No conversationId provided');
+  }
+
+  if (conversationId) {
+    try {
+      codexReviewConversationIds = await findCodexReviewConversationIds(req.user.id, {
+        conversationId,
+      });
+      await abortCodexReviewJobs(codexReviewConversationIds);
+    } catch (error) {
+      logger.warn('[CodexReviewCleanup] Failed to prepare conversation cleanup', {
+        conversationId,
+        error: error?.message ?? error,
+      });
+    }
   }
 
   if (
@@ -148,6 +168,7 @@ router.delete('/', async (req, res) => {
       await db.deleteToolCalls(req.user.id, filter.conversationId);
       await deleteConvoSharedLinksWithCleanup(req.user.id, filter.conversationId);
     }
+    await deleteSidecarTasksByConversation(codexReviewConversationIds);
     res.status(201).json(dbResponse);
   } catch (error) {
     logger.error('Error clearing conversations', error);
@@ -156,10 +177,22 @@ router.delete('/', async (req, res) => {
 });
 
 router.delete('/all', async (req, res) => {
+  let codexReviewConversationIds = [];
+  try {
+    codexReviewConversationIds = await findCodexReviewConversationIds(req.user.id);
+    await abortCodexReviewJobs(codexReviewConversationIds);
+  } catch (error) {
+    logger.warn('[CodexReviewCleanup] Failed to prepare bulk cleanup', {
+      userId: req.user.id,
+      error: error?.message ?? error,
+    });
+  }
+
   try {
     const dbResponse = await db.deleteConvos(req.user.id, {});
     await db.deleteToolCalls(req.user.id);
     await deleteAllSharedLinksWithCleanup(req.user.id);
+    await deleteSidecarTasksByConversation(codexReviewConversationIds);
     res.status(201).json(dbResponse);
   } catch (error) {
     logger.error('Error clearing conversations', error);

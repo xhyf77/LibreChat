@@ -378,6 +378,8 @@ function useClearSubmissionState() {
 
           logger.log('resetting submission', key);
           reset(submissionByIndex(key));
+          reset(showStopButtonByIndex(key));
+          reset(isSubmittingFamily(key));
         }
 
         set(submissionKeysSelector, []);

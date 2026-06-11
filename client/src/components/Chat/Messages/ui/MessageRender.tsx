@@ -3,7 +3,12 @@ import { useAtomValue } from 'jotai';
 import { useRecoilValue } from 'recoil';
 import type { TMessage } from 'librechat-data-provider';
 import type { TMessageProps, TMessageIcon, TMessageChatContext } from '~/common';
-import { cn, getHeaderPrefixForScreenReader, getMessageAriaLabel } from '~/utils';
+import {
+  cn,
+  getHeaderPrefixForScreenReader,
+  getMessageAriaLabel,
+  isCodexReviewAssistantMessage,
+} from '~/utils';
 import MessageContent from '~/components/Chat/Messages/Content/MessageContent';
 import { useLocalize, useMessageActions, useContentMetadata } from '~/hooks';
 import PlaceholderRow from '~/components/Chat/Messages/ui/PlaceholderRow';
@@ -78,6 +83,7 @@ function areMessageRenderPropsEqual(prev: MessageRenderProps, next: MessageRende
     prevMsg.content === nextMsg.content &&
     prevMsg.model === nextMsg.model &&
     prevMsg.endpoint === nextMsg.endpoint &&
+    isCodexReviewAssistantMessage(prevMsg) === isCodexReviewAssistantMessage(nextMsg) &&
     prevMsg.iconURL === nextMsg.iconURL &&
     prevMsg.feedback?.rating === nextMsg.feedback?.rating &&
     (prevMsg.files?.length ?? 0) === (nextMsg.files?.length ?? 0)
@@ -163,6 +169,8 @@ const MessageRender = memo(function MessageRender({
     return null;
   }
 
+  const isCodexReview = isCodexReviewAssistantMessage(msg);
+
   const getChatWidthClass = () => {
     if (maximizeChatSpace) {
       return 'w-full max-w-full md:px-5 lg:px-1 xl:px-5';
@@ -191,6 +199,7 @@ const MessageRender = memo(function MessageRender({
         baseClasses.chat,
         conditionalClasses.focus,
         'message-render',
+        isCodexReview && 'codex-review-render',
       )}
     >
       {!hasParallelContent && (

@@ -44,6 +44,10 @@ const { jwtLogin, ldapLogin, passportLogin } = require('~/strategies');
 const { checkMigrations } = require('./services/start/migration');
 const optionalJwtAuth = require('./middleware/optionalJwtAuth');
 const initializeMCPs = require('./services/initializeMCPs');
+const {
+  attachCodexCliTerminal,
+  shutdownCodexCliTerminal,
+} = require('./services/CodexCliTerminal');
 const configureSocialLogins = require('./socialLogins');
 const createSpaFallback = require('./utils/fallback');
 const { getAppConfig } = require('./services/Config');
@@ -266,6 +270,7 @@ const startServer = async () => {
   app.use('/api/roles', routes.roles);
   app.use('/api/agents/chat', rejectChatStartsUntilReady);
   app.use('/api/agents', routes.agents);
+  app.use('/api/codex-cli', routes.codexCli);
   app.use('/api/banner', routes.banner);
   app.use('/api/memories', routes.memories);
   app.use('/api/permissions', routes.accessPermissions);
@@ -334,7 +339,10 @@ const startServer = async () => {
   });
 
   setupGracefulShutdown(server);
+  attachCodexCliTerminal(server);
 };
+
+process.once('exit', shutdownCodexCliTerminal);
 
 /**
  * Boot rejections (e.g. `connectDb`, `getAppConfig`, `performStartupChecks`)

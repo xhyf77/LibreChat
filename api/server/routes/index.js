@@ -25,6 +25,7 @@ const models = require('./models');
 const convos = require('./convos');
 const config = require('./config');
 const agents = require('./agents');
+const codexCli = require('./codexCli');
 const roles = require('./roles');
 const oauth = require('./oauth');
 const files = require('./files');
@@ -57,6 +58,7 @@ module.exports = {
   share,
   banner,
   agents,
+  codexCli,
   convos,
   search,
   config,

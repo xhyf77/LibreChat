@@ -194,5 +194,8 @@
       "admin/",
       "packages/"
     ]
+  },
+  "dependencies": {
+    "diff2html": "^3.4.56"
   }
 }

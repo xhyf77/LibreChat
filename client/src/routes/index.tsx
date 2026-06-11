@@ -18,7 +18,7 @@ import StartupLayout from './Layouts/Startup';
 import LoginLayout from './Layouts/Login';
 import dashboardRoutes from './Dashboard';
 import ShareRoute from './ShareRoute';
-import ChatRoute from './ChatRoute';
+import CodexCliRoute from './CodexCliRoute';
 import Search from './Search';
 import Root from './Root';
 
@@ -124,11 +124,15 @@ export const router = createBrowserRouter(
           children: [
             {
               index: true,
-              element: <Navigate to="/c/new" replace={true} />,
+              element: <Navigate to="/codex/new" replace={true} />,
+            },
+            {
+              path: 'codex/:sessionId?',
+              element: <CodexCliRoute />,
             },
             {
               path: 'c/:conversationId?',
-              element: <ChatRoute />,
+              element: <Navigate to="/codex/new" replace={true} />,
             },
             {
               path: 'search',

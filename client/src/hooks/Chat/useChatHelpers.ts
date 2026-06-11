@@ -3,8 +3,8 @@ import { QueryKeys, isAssistantsEndpoint } from 'librechat-data-provider';
 import { useQueryClient } from '@tanstack/react-query';
 import { useRecoilState, useSetRecoilState } from 'recoil';
 import type { TMessage } from 'librechat-data-provider';
-import type { ActiveJobsResponse } from '~/data-provider';
 import useChatFunctions from '~/hooks/Chat/useChatFunctions';
+import { cleanupAbortedResumableConversation } from './abortCleanup';
 import { useAbortStreamMutation } from '~/data-provider';
 import useNewConvo from '~/hooks/useNewConvo';
 import { useLatestMessage, useLatestMessageId } from '~/hooks/Messages/useLatestMessage';
@@ -140,28 +140,39 @@ export default function useChatHelpers(index = 0, paramId?: string) {
 
     // For non-assistants endpoints (using resumable streams), call abort endpoint first
     if (conversationId && !isAssistants) {
-      queryClient.setQueryData<ActiveJobsResponse>([QueryKeys.activeJobs], (old) => ({
-        activeJobIds: (old?.activeJobIds ?? []).filter((id) => id !== conversationId),
-      }));
-
       try {
         console.log('[useChatHelpers] Calling abort mutation for:', conversationId);
         await abortMutation.mutateAsync({ conversationId });
         console.log('[useChatHelpers] Abort mutation succeeded');
-        // The SSE will receive a `done` event with `aborted: true` and clean up
-        // We still clear submissions as a fallback
-        clearAllSubmissions();
       } catch (error) {
         console.error('[useChatHelpers] Abort failed:', error);
-        // Fall back to clearing submissions
-        clearAllSubmissions();
+      } finally {
+        cleanupAbortedResumableConversation({
+          conversationId,
+          queryClient,
+          getMessages,
+          setMessages,
+        });
+        setIsSubmitting(false);
+        setSubmission(null);
       }
     } else {
       // For assistants endpoints, just clear submissions (existing behavior)
       console.log('[useChatHelpers] Assistants endpoint, just clearing submissions');
       clearAllSubmissions();
     }
-  }, [conversationId, endpoint, endpointType, abortMutation, clearAllSubmissions, queryClient]);
+  }, [
+    conversationId,
+    endpoint,
+    endpointType,
+    abortMutation,
+    clearAllSubmissions,
+    getMessages,
+    queryClient,
+    setIsSubmitting,
+    setMessages,
+    setSubmission,
+  ]);
 
   const handleStopGenerating = useCallback(
     (e: React.MouseEvent<HTMLButtonElement>) => {

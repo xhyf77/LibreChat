@@ -4,7 +4,12 @@ import { useRecoilValue } from 'recoil';
 import type { TMessage, TMessageContentParts } from 'librechat-data-provider';
 import type { TMessageProps, TMessageIcon, TMessageChatContext } from '~/common';
 import { useAttachments, useLocalize, useMessageActions, useContentMetadata } from '~/hooks';
-import { cn, getHeaderPrefixForScreenReader, getMessageAriaLabel } from '~/utils';
+import {
+  cn,
+  getHeaderPrefixForScreenReader,
+  getMessageAriaLabel,
+  isCodexReviewAssistantMessage,
+} from '~/utils';
 import ContentParts from '~/components/Chat/Messages/Content/ContentParts';
 import PlaceholderRow from '~/components/Chat/Messages/ui/PlaceholderRow';
 import SiblingSwitch from '~/components/Chat/Messages/SiblingSwitch';
@@ -76,6 +81,7 @@ function areContentRenderPropsEqual(prev: ContentRenderProps, next: ContentRende
     prevMsg.content === nextMsg.content &&
     prevMsg.model === nextMsg.model &&
     prevMsg.endpoint === nextMsg.endpoint &&
+    isCodexReviewAssistantMessage(prevMsg) === isCodexReviewAssistantMessage(nextMsg) &&
     prevMsg.iconURL === nextMsg.iconURL &&
     prevMsg.feedback?.rating === nextMsg.feedback?.rating &&
     (prevMsg.attachments?.length ?? 0) === (nextMsg.attachments?.length ?? 0) &&
@@ -156,6 +162,8 @@ const ContentRender = memo(function ContentRender({
     return null;
   }
 
+  const isCodexReview = isCodexReviewAssistantMessage(msg);
+
   const getChatWidthClass = () => {
     if (maximizeChatSpace) {
       return 'w-full max-w-full md:px-5 lg:px-1 xl:px-5';
@@ -184,6 +192,7 @@ const ContentRender = memo(function ContentRender({
         baseClasses.chat,
         conditionalClasses.focus,
         'message-render',
+        isCodexReview && 'codex-review-render',
       )}
     >
       {!hasParallelContent && (

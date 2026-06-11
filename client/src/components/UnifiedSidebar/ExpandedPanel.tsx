@@ -1,15 +1,12 @@
 import { memo, useCallback, lazy, Suspense } from 'react';
-import { useQueryClient } from '@tanstack/react-query';
-import { useRecoilValue } from 'recoil';
+import { useNavigate } from 'react-router-dom';
 import { SquarePen } from 'lucide-react';
-import { QueryKeys } from 'librechat-data-provider';
 import { Skeleton, Sidebar, Button, TooltipAnchor } from '@librechat/client';
 import type { NavLink } from '~/common';
 import { CLOSE_SIDEBAR_ID } from '~/components/Chat/Menus/OpenSidebar';
 import { useActivePanel, resolveActivePanel, DEFAULT_PANEL } from '~/Providers';
-import { useLocalize, useNewConvo } from '~/hooks';
-import { clearMessagesCache, cn } from '~/utils';
-import store from '~/store';
+import { useLocalize } from '~/hooks';
+import { cn } from '~/utils';
 
 const AccountSettings = lazy(() => import('~/components/Nav/AccountSettings'));
 
@@ -19,24 +16,17 @@ const NewChatButton = memo(function NewChatButton({
   setActive: (id: string) => void;
 }) {
   const localize = useLocalize();
-  const queryClient = useQueryClient();
-  const { newConversation } = useNewConvo();
-  const conversation = useRecoilValue(store.conversationByIndex(0));
-  const switchToHistory = useRecoilValue(store.newChatSwitchToHistory);
+  const navigate = useNavigate();
 
   const handleClick = useCallback(
     (e: React.MouseEvent<HTMLAnchorElement>) => {
       if (e.button === 0 && !e.ctrlKey && !e.metaKey) {
         e.preventDefault();
-        clearMessagesCache(queryClient, conversation?.conversationId);
-        queryClient.invalidateQueries([QueryKeys.messages]);
-        newConversation();
-        if (switchToHistory) {
-          setActive(DEFAULT_PANEL);
-        }
+        setActive(DEFAULT_PANEL);
+        navigate('/codex/new');
       }
     },
-    [queryClient, conversation?.conversationId, newConversation, switchToHistory, setActive],
+    [navigate, setActive],
   );
 
   return (
@@ -45,7 +35,7 @@ const NewChatButton = memo(function NewChatButton({
       description={localize('com_ui_new_chat')}
       render={
         <a
-          href="/c/new"
+          href="/codex/new"
           data-testid="new-chat-button"
           aria-label={localize('com_ui_new_chat')}
           className="flex h-9 w-9 items-center justify-center rounded-lg transition-colors hover:bg-surface-hover"

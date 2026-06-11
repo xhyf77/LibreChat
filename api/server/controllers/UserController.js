@@ -21,6 +21,11 @@ const { verifyOTPOrBackupCode } = require('~/server/services/twoFactorService');
 const { verifyEmail, resendVerificationEmail } = require('~/server/services/AuthService');
 const { getMCPManager, getFlowStateManager, getMCPServersRegistry } = require('~/config');
 const { invalidateCachedTools } = require('~/server/services/Config/getCachedTools');
+const {
+  abortCodexReviewJobs,
+  deleteSidecarTasksByConversation,
+  findCodexReviewConversationIds,
+} = require('~/server/services/CodexReview/cleanup');
 const { processDeleteRequest } = require('~/server/services/Files/process');
 const { getAppConfig } = require('~/server/services/Config');
 const { getLogStores } = require('~/cache');
@@ -329,6 +334,7 @@ const updateUserPluginsController = async (req, res) => {
 
 const deleteUserController = async (req, res) => {
   const { user } = req;
+  let codexReviewConversationIds = [];
 
   try {
     const existingUser = await db.getUserById(
@@ -345,6 +351,16 @@ const deleteUserController = async (req, res) => {
           'TOTP token or backup code is required to delete account with 2FA enabled';
         return res.status(result.status ?? 400).json({ message: msg });
       }
+    }
+
+    try {
+      codexReviewConversationIds = await findCodexReviewConversationIds(user.id);
+      await abortCodexReviewJobs(codexReviewConversationIds);
+    } catch (error) {
+      logger.warn('[deleteUserController] Failed to prepare Codex Review cleanup', {
+        userId: user.id,
+        error: error?.message ?? error,
+      });
     }
 
     await db.deleteMessages({ user: user.id });
@@ -376,6 +392,7 @@ const deleteUserController = async (req, res) => {
     await db.deleteTokens({ userId: user.id });
     await db.removeUserFromAllGroups(user.id);
     await db.deleteAclEntries({ principalId: user._id });
+    await deleteSidecarTasksByConversation(codexReviewConversationIds);
     logger.info(`User deleted account. Email: ${user.email} ID: ${user.id}`);
     res.status(200).send({ message: 'User deleted' });
   } catch (err) {

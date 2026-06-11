@@ -18,6 +18,7 @@ import type { LocalizeFunction } from '~/common';
 
 export const TEXT_KEY_DIVIDER = '|||';
 export const STREAM_START_FAILED_METADATA_KEY = 'streamStartFailed';
+export const CODEX_REVIEW_ENDPOINT = 'codex-review';
 
 type SiblingIndexLookup = (parentMessageId: string | null | undefined) => number;
 
@@ -193,6 +194,16 @@ export const getAllContentText = (message?: TMessage | null): string => {
 
 export const hasStreamStartFailed = (message?: Pick<TMessage, 'metadata'> | null): boolean =>
   message?.metadata?.[STREAM_START_FAILED_METADATA_KEY] === true;
+
+export const isCodexReviewAssistantMessage = (
+  message?: Pick<TMessage, 'endpoint' | 'isCreatedByUser' | 'metadata'> | null,
+): boolean => {
+  if (!message || message.isCreatedByUser) {
+    return false;
+  }
+
+  return message.endpoint === CODEX_REVIEW_ENDPOINT || message.metadata?.codexReview != null;
+};
 
 export const markStreamStartFailedMetadata = (
   metadata?: TMessage['metadata'],

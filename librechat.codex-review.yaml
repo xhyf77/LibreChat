@@ -1,0 +1,45 @@
+version: 1.3.12
+
+cache: true
+
+interface:
+  customWelcome: 'Codex CLI'
+  modelSelect: true
+  parameters: false
+  presets: true
+  prompts:
+    use: true
+    create: true
+    share: false
+    public: false
+  bookmarks: true
+  multiConvo: true
+  agents:
+    use: false
+    create: false
+    share: false
+    public: false
+  marketplace:
+    use: false
+
+endpoints:
+  custom:
+    - name: 'codex-review'
+      apiKey: '${CODEX_REVIEW_DUMMY_API_KEY}'
+      baseURL: 'http://127.0.0.1:9/v1'
+      models:
+        default:
+          - 'Ruc-model'
+        fetch: false
+      titleConvo: false
+      modelDisplayLabel: 'Ruc-model'
+
+modelSpecs:
+  list:
+    - name: 'Ruc-model'
+      label: 'Ruc-model'
+      description: 'Open a native Codex CLI session in the configured repository.'
+      default: true
+      preset:
+        endpoint: 'codex-review'
+        model: 'Ruc-model'

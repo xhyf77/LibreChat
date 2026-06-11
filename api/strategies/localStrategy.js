@@ -16,6 +16,7 @@ async function validateLoginRequest(req) {
 
 async function passportLogin(req, email, password, done) {
   try {
+    const loginIdentifier = email.trim();
     const validationError = await validateLoginRequest(req);
     if (validationError) {
       logError('Passport Local Strategy - Validation Error', { email: req.body?.email });
@@ -23,7 +24,10 @@ async function passportLogin(req, email, password, done) {
       return done(null, false, { message: validationError });
     }
 
-    const user = await findUser({ email: email.trim() }, '+password');
+    const user = loginIdentifier.includes('@')
+      ? await findUser({ email: loginIdentifier }, '+password')
+      : ((await findUser({ username: loginIdentifier }, '+password')) ??
+        (await findUser({ email: loginIdentifier }, '+password')));
     if (!user) {
       logError('Passport Local Strategy - User Not Found', { email });
       logger.error(`[Login] [Login failed] [Username: ${email}] [Request-IP: ${req.ip}]`);

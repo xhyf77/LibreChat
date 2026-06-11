@@ -1,6 +1,10 @@
 import type { TMessage } from 'librechat-data-provider';
 import type { LocalizeFunction } from '~/common';
-import { getMessageAriaLabel, getHeaderPrefixForScreenReader } from '../messages';
+import {
+  getMessageAriaLabel,
+  getHeaderPrefixForScreenReader,
+  isCodexReviewAssistantMessage,
+} from '../messages';
 
 const translations: Record<string, string> = {
   com_endpoint_message: 'Message',
@@ -78,5 +82,26 @@ describe('getHeaderPrefixForScreenReader', () => {
   it('omits number when depth is negative', () => {
     const msg = makeMessage({ isCreatedByUser: false, depth: -5 });
     expect(getHeaderPrefixForScreenReader(msg, localize)).toBe('Response: ');
+  });
+});
+
+describe('isCodexReviewAssistantMessage', () => {
+  it('matches assistant messages from the Codex Review endpoint', () => {
+    const msg = makeMessage({ endpoint: 'codex-review', isCreatedByUser: false });
+    expect(isCodexReviewAssistantMessage(msg)).toBe(true);
+  });
+
+  it('matches assistant messages with Codex Review metadata', () => {
+    const msg = makeMessage({
+      endpoint: 'custom',
+      isCreatedByUser: false,
+      metadata: { codexReview: { taskId: 'task-1' } },
+    });
+    expect(isCodexReviewAssistantMessage(msg)).toBe(true);
+  });
+
+  it('does not match user messages from the Codex Review endpoint', () => {
+    const msg = makeMessage({ endpoint: 'codex-review', isCreatedByUser: true });
+    expect(isCodexReviewAssistantMessage(msg)).toBe(false);
   });
 });

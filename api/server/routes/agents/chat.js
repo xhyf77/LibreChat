@@ -10,6 +10,7 @@ const {
 } = require('~/server/middleware');
 const { initializeClient } = require('~/server/services/Endpoints/agents');
 const AgentController = require('~/server/controllers/agents/request');
+const CodexReviewController = require('~/server/controllers/codexReview');
 const addTitle = require('~/server/services/Endpoints/agents/title');
 const { getRoleByName } = require('~/models');
 
@@ -24,6 +25,14 @@ const checkAgentAccess = generateCheckAccess({
 const checkAgentResourceAccess = canAccessAgentFromBody({
   requiredPermission: PermissionBits.VIEW,
 });
+
+router.post(
+  '/codex-review',
+  createMessageFilterPii({ getConfig: (req) => req.config?.messageFilter?.pii }),
+  moderateText,
+  validateConvoAccess,
+  CodexReviewController,
+);
 
 router.use(createMessageFilterPii({ getConfig: (req) => req.config?.messageFilter?.pii }));
 router.use(moderateText);

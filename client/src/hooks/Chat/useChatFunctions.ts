@@ -70,13 +70,41 @@ const getAppendParentMessageId = ({
   return failedUserMessage.parentMessageId ?? Constants.NO_PARENT;
 };
 
-const hasPendingAssistantParent = (message: TMessage | null) =>
+const hasAssistantContent = (message: TMessage) =>
+  (typeof message.text === 'string' && message.text.trim() !== '') ||
+  (Array.isArray(message.content) && message.content.length > 0) ||
+  (Array.isArray(message.attachments) && message.attachments.length > 0) ||
+  (Array.isArray(message.files) && message.files.length > 0);
+
+export const hasPendingAssistantParent = (message: TMessage | null) =>
   !!message?.messageId &&
   message.isCreatedByUser !== true &&
   message.messageId.endsWith('_') &&
   message.createdAt == null &&
   message.updatedAt == null &&
-  !hasStreamStartFailed(message);
+  !hasStreamStartFailed(message) &&
+  (message.unfinished === true || !hasAssistantContent(message));
+
+const validEndpointTypes = new Set<string>(Object.values(EModelEndpoint));
+
+export function normalizeEndpointType(
+  endpoint?: string | null,
+  endpointType?: string | null,
+): EModelEndpoint | string | undefined {
+  if (endpointType && validEndpointTypes.has(endpointType)) {
+    return endpointType as EModelEndpoint;
+  }
+
+  if (endpoint && endpointType === endpoint && !validEndpointTypes.has(endpoint)) {
+    return EModelEndpoint.custom;
+  }
+
+  if (!endpointType && endpoint && !validEndpointTypes.has(endpoint)) {
+    return EModelEndpoint.custom;
+  }
+
+  return endpointType ?? undefined;
+}
 
 type RegenerateTargetResponseArgs = {
   messages: TMessage[];
@@ -360,15 +388,21 @@ export default function useChatFunctions({
 
     const endpointsConfig = queryClient.getQueryData<TEndpointsConfig>([QueryKeys.endpoints]);
     const startupConfig = queryClient.getQueryData<TStartupConfig>(startupConfigKey(true));
-    const endpointType = getEndpointField(endpointsConfig, endpoint, 'type');
+    const endpointType = normalizeEndpointType(
+      endpoint,
+      getEndpointField(endpointsConfig, endpoint, 'type') ??
+        (typeof conversation?.endpointType === 'string' ? conversation.endpointType : undefined),
+    );
     const iconURL = conversation?.iconURL;
     const defaultParamsEndpoint = getDefaultParamsEndpoint(endpointsConfig, endpoint);
+    const normalizedConversationForPayload =
+      endpointType != null ? { ...conversationForPayload, endpointType } : conversationForPayload;
 
     /** This becomes part of the `endpointOption` */
     const convo = parseCompactConvo({
       endpoint: endpoint as EndpointSchemaKey,
       endpointType: endpointType as EndpointSchemaKey,
-      conversation: conversationForPayload,
+      conversation: normalizedConversationForPayload,
       defaultParamsEndpoint,
     });
 
@@ -529,7 +563,7 @@ export default function useChatFunctions({
     logger.log('message_state', initialResponse);
     const submission: TSubmission = {
       conversation: {
-        ...conversation,
+        ...normalizedConversationForPayload,
         ...(chatProjectId ? { chatProjectId } : {}),
         conversationId,
       },

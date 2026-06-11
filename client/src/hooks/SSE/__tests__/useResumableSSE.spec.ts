@@ -4,6 +4,7 @@ import {
   LocalStorageKeys,
   QueryKeys,
   StepEvents,
+  createPayload,
   request,
 } from 'librechat-data-provider';
 import type { TMessage, TSubmission } from 'librechat-data-provider';
@@ -161,7 +162,7 @@ jest.mock('librechat-data-provider', () => {
   };
 });
 
-import useResumableSSE from '~/hooks/SSE/useResumableSSE';
+import useResumableSSE, { reconcileCodexReviewFinalMessages } from '~/hooks/SSE/useResumableSSE';
 
 const CONV_ID = 'conv-abc-123';
 
@@ -236,6 +237,94 @@ const advanceRetryTimer = async (ms: number) => {
   await flushMicrotasks();
 };
 
+describe('reconcileCodexReviewFinalMessages', () => {
+  const userMessage = {
+    messageId: 'user-1',
+    conversationId: CONV_ID,
+    text: 'review this',
+    isCreatedByUser: true,
+  } as TMessage;
+
+  it('replaces an unfinished Codex Review placeholder with the final response', () => {
+    const placeholder = {
+      messageId: 'user-1_',
+      parentMessageId: 'user-1',
+      conversationId: CONV_ID,
+      text: 'Running Codex...',
+      content: [{ type: 'text', text: 'Running Codex...' }],
+      isCreatedByUser: false,
+      unfinished: true,
+    } as TMessage;
+    const responseMessage = {
+      messageId: 'user-1_',
+      parentMessageId: 'user-1',
+      conversationId: CONV_ID,
+      text: 'Done.',
+      content: [{ type: 'text', text: 'Done.' }],
+      isCreatedByUser: false,
+      createdAt: '2026-06-11T08:00:00.000Z',
+      updatedAt: '2026-06-11T08:00:00.000Z',
+      unfinished: false,
+    } as TMessage;
+
+    const result = reconcileCodexReviewFinalMessages({
+      messages: [userMessage, placeholder],
+      userMessage,
+      initialResponse: placeholder,
+      responseMessage,
+      conversationId: CONV_ID,
+    });
+
+    expect(result).toEqual([userMessage, responseMessage]);
+  });
+
+  it('removes a pending Codex Review placeholder when final has no response message', () => {
+    const placeholder = {
+      messageId: 'user-1_',
+      parentMessageId: 'user-1',
+      conversationId: CONV_ID,
+      text: '',
+      content: [],
+      isCreatedByUser: false,
+      unfinished: true,
+    } as TMessage;
+
+    const result = reconcileCodexReviewFinalMessages({
+      messages: [userMessage, placeholder],
+      userMessage,
+      initialResponse: placeholder,
+      conversationId: CONV_ID,
+    });
+
+    expect(result).toEqual([userMessage]);
+  });
+
+  it('leaves messages unchanged when there is no pending Codex Review placeholder', () => {
+    const finalMessage = {
+      messageId: 'response-1',
+      parentMessageId: 'user-1',
+      conversationId: CONV_ID,
+      text: 'Done.',
+      content: [{ type: 'text', text: 'Done.' }],
+      isCreatedByUser: false,
+      createdAt: '2026-06-11T08:00:00.000Z',
+      updatedAt: '2026-06-11T08:00:00.000Z',
+      unfinished: false,
+    } as TMessage;
+    const messages = [userMessage, finalMessage];
+
+    const result = reconcileCodexReviewFinalMessages({
+      messages,
+      userMessage,
+      initialResponse: { messageId: 'different_' } as TMessage,
+      responseMessage: finalMessage,
+      conversationId: CONV_ID,
+    });
+
+    expect(result).toBe(messages);
+  });
+});
+
 describe('useResumableSSE - 404 error path', () => {
   beforeEach(() => {
     mockSSEInstances.length = 0;
@@ -257,6 +346,11 @@ describe('useResumableSSE - 404 error path', () => {
     mockSetAbortScroll.mockClear();
     mockSetSubmission.mockClear();
     mockSetShowStopButton.mockClear();
+    (createPayload as jest.Mock).mockReset();
+    (createPayload as jest.Mock).mockReturnValue({
+      payload: { model: 'gpt-4o' },
+      server: '/api/agents/chat',
+    });
     (request.post as jest.Mock).mockReset();
     (request.post as jest.Mock).mockResolvedValue({ streamId: 'stream-123' });
   });
@@ -269,6 +363,34 @@ describe('useResumableSSE - 404 error path', () => {
     localStorage.setItem(`${LocalStorageKeys.TEXT_DRAFT}${conversationId}`, 'draft text');
     localStorage.setItem(`${LocalStorageKeys.FILES_DRAFT}${conversationId}`, '[]');
   };
+
+  it('clears submitting state when payload creation fails before the POST', async () => {
+    (createPayload as jest.Mock).mockImplementationOnce(() => {
+      throw new Error('Invalid enum value for endpointType');
+    });
+    const submission = buildSubmission();
+    const chatHelpers = buildChatHelpers();
+
+    const { unmount } = renderHook(() => useResumableSSE(submission, chatHelpers));
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(request.post).not.toHaveBeenCalled();
+    expect(mockErrorHandler).toHaveBeenCalledWith(
+      expect.objectContaining({
+        submission,
+      }),
+    );
+    expect(mockErrorHandler.mock.calls[0][0].data.text).toContain(
+      'Invalid enum value for endpointType',
+    );
+    expect(mockSetShowStopButton).toHaveBeenCalledWith(false);
+    expect(mockSetIsSubmitting).toHaveBeenCalledWith(false);
+    expect(mockSetSubmission).toHaveBeenCalledWith(null);
+    unmount();
+  });
 
   const render404Scenario = async (conversationId = CONV_ID) => {
     const submission = buildSubmission({ conversation: { conversationId } });
@@ -313,6 +435,7 @@ describe('useResumableSSE - 404 error path', () => {
     });
     expect(mockClearStepMaps).toHaveBeenCalled();
     expect(mockSetIsSubmitting).toHaveBeenCalledWith(false);
+    expect(mockSetSubmission).toHaveBeenCalledWith(null);
     unmount();
   });
 
@@ -916,6 +1039,90 @@ describe('useResumableSSE - 404 error path', () => {
 
     expect(mockTitleHandler).toHaveBeenCalledWith(titleEvent);
     expect(mockStepHandler).not.toHaveBeenCalled();
+    unmount();
+  });
+
+  it('clears final submission state and can start a second request in the same conversation', async () => {
+    const firstSubmission = buildSubmission({
+      userMessage: {
+        messageId: 'msg-1',
+        conversationId: CONV_ID,
+        text: 'First question',
+        isCreatedByUser: true,
+        sender: 'User',
+        parentMessageId: Constants.NO_PARENT,
+      },
+      initialResponse: {
+        messageId: 'msg-1_',
+        conversationId: CONV_ID,
+        text: '',
+        isCreatedByUser: false,
+        sender: 'Assistant',
+        parentMessageId: 'msg-1',
+      },
+    });
+    const secondSubmission = buildSubmission({
+      userMessage: {
+        messageId: 'msg-2',
+        conversationId: CONV_ID,
+        text: 'Second question',
+        isCreatedByUser: true,
+        sender: 'User',
+        parentMessageId: 'msg-1_',
+      },
+      initialResponse: {
+        messageId: 'msg-2_',
+        conversationId: CONV_ID,
+        text: '',
+        isCreatedByUser: false,
+        sender: 'Assistant',
+        parentMessageId: 'msg-2',
+      },
+    });
+    const chatHelpers = buildChatHelpers();
+
+    const { rerender, unmount } = renderHook(
+      ({ submission }) => useResumableSSE(submission, chatHelpers),
+      { initialProps: { submission: firstSubmission } },
+    );
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(request.post).toHaveBeenCalledTimes(1);
+
+    const firstSSE = getLastSSE();
+    await act(async () => {
+      firstSSE._emit('message', {
+        data: JSON.stringify({
+          final: true,
+          conversation: { conversationId: CONV_ID },
+          requestMessage: firstSubmission.userMessage,
+          responseMessage: {
+            messageId: 'msg-1_',
+            conversationId: CONV_ID,
+            text: 'First answer',
+            isCreatedByUser: false,
+            sender: 'Assistant',
+            parentMessageId: 'msg-1',
+          },
+        }),
+      });
+    });
+
+    expect(mockFinalHandler).toHaveBeenCalledTimes(1);
+    expect(mockSetSubmission).toHaveBeenCalledWith(null);
+    expect(mockSetIsSubmitting).toHaveBeenCalledWith(false);
+    expect(mockSetShowStopButton).toHaveBeenCalledWith(false);
+    expect(firstSSE.close).toHaveBeenCalled();
+
+    await act(async () => {
+      rerender({ submission: secondSubmission });
+      await Promise.resolve();
+    });
+
+    expect(request.post).toHaveBeenCalledTimes(2);
+    expect(mockSSEInstances).toHaveLength(2);
     unmount();
   });
 

@@ -220,32 +220,65 @@ router.post('/chat/abort', async (req, res) => {
   logger.debug(`[AgentStream] Method: ${req.method}, Path: ${req.path}`);
   logger.debug(`[AgentStream] Body:`, req.body);
 
-  const { streamId, conversationId, abortKey } = req.body;
+  const { streamId, conversationId } = req.body;
   const userId = req.user?.id;
 
-  // streamId === conversationId, so try any of the provided IDs
-  // Skip "new" as it's a placeholder for new conversations, not an actual ID
-  let jobStreamId =
-    streamId || (conversationId !== 'new' ? conversationId : null) || abortKey?.split(':')[0];
+  let jobStreamId = streamId || null;
   let job = jobStreamId ? await GenerationJobManager.getJob(jobStreamId) : null;
+  const hasConversationTarget = Boolean(conversationId && conversationId !== 'new');
 
-  // Fallback: if job not found and we have a userId, look up active jobs for user
-  // This handles the case where frontend sends "new" but job was created with a UUID
-  if (!job && userId) {
-    logger.debug(`[AgentStream] Job not found by ID, checking active jobs for user: ${userId}`);
+  if (!job && !streamId && hasConversationTarget) {
+    jobStreamId = conversationId;
+    job = await GenerationJobManager.getJob(jobStreamId);
+  }
+
+  if (!job && !streamId && hasConversationTarget && userId) {
+    logger.debug(
+      `[AgentStream] Job not found by conversationId, checking active jobs for user: ${userId}`,
+    );
     const activeJobIds = await GenerationJobManager.getActiveJobIdsForUser(
       userId,
       req.user.tenantId,
     );
-    if (activeJobIds.length > 0) {
-      // Abort the most recent active job for this user
-      jobStreamId = activeJobIds[0];
-      job = await GenerationJobManager.getJob(jobStreamId);
-      logger.debug(`[AgentStream] Found active job for user: ${jobStreamId}`);
+
+    const matchingJobs = [];
+    for (const activeJobId of activeJobIds) {
+      const activeJob = await GenerationJobManager.getJob(activeJobId);
+      if (!activeJob) {
+        continue;
+      }
+
+      if (activeJob.metadata?.userId && activeJob.metadata.userId !== userId) {
+        continue;
+      }
+
+      if (hasTenantMismatch(activeJob, req.user)) {
+        continue;
+      }
+
+      if (activeJob.metadata?.conversationId === conversationId) {
+        matchingJobs.push({ streamId: activeJobId, job: activeJob });
+      }
+    }
+
+    if (matchingJobs.length === 1) {
+      jobStreamId = matchingJobs[0].streamId;
+      job = matchingJobs[0].job;
+      logger.debug(`[AgentStream] Found active job for conversation: ${jobStreamId}`);
+    } else if (matchingJobs.length > 1) {
+      logger.warn(
+        `[AgentStream] Ambiguous abort target for conversationId: ${conversationId}, matches: ${matchingJobs.length}`,
+      );
+      return res.status(409).json({ error: 'Ambiguous abort target', conversationId });
     }
   }
 
   logger.debug(`[AgentStream] Computed jobStreamId: ${jobStreamId}`);
+
+  if (!streamId && !hasConversationTarget) {
+    logger.warn(`[AgentStream] Missing abort target`);
+    return res.status(400).json({ error: 'Missing abort target' });
+  }
 
   if (job && jobStreamId) {
     if (job.metadata?.userId && job.metadata.userId !== userId) {

@@ -5,7 +5,6 @@ import { ThemeContext, SecretInput, Spinner, Button, isDark } from '@librechat/c
 import type { TLoginUser, TStartupConfig } from 'librechat-data-provider';
 import type { TAuthContext } from '~/common';
 import { useResendVerificationEmail, useGetStartupConfig } from '~/data-provider';
-import { validateEmail } from '~/utils';
 import { useLocalize } from '~/hooks';
 
 type TLoginFormProps = {
@@ -99,23 +98,18 @@ const LoginForm: React.FC<TLoginFormProps> = ({ onSubmit, startupConfig, error, 
             <input
               type="text"
               id="email"
-              autoComplete={useUsernameLogin ? 'username' : 'email'}
+              autoComplete="username"
               aria-label={localize('com_auth_email')}
               {...register('email', {
                 required: localize('com_auth_email_required'),
                 maxLength: { value: 120, message: localize('com_auth_email_max_length') },
-                validate: useUsernameLogin
-                  ? undefined
-                  : (value) => validateEmail(value, localize('com_auth_email_pattern')),
               })}
               aria-invalid={!!errors.email}
               className={authInputClassName}
               placeholder=" "
             />
             <label htmlFor="email" className={authLabelClassName}>
-              {useUsernameLogin
-                ? localize('com_auth_username').replace(/ \(.*$/, '')
-                : localize('com_auth_email_address')}
+              {useUsernameLogin ? localize('com_auth_username').replace(/ \(.*$/, '') : '账号'}
             </label>
           </div>
           {renderError('email')}

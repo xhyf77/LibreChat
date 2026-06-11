@@ -1,5 +1,6 @@
 import { RecoilRoot, useRecoilValue } from 'recoil';
-import { Constants } from 'librechat-data-provider';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { Constants, QueryKeys } from 'librechat-data-provider';
 import { renderHook, act } from '@testing-library/react';
 
 import type { TMessage, TConversation, TSubmission } from 'librechat-data-provider';
@@ -14,6 +15,7 @@ const mockUseStreamStatus = jest.fn();
 jest.mock('~/data-provider', () => ({
   useStreamStatus: (conversationId: string | undefined, enabled: boolean) =>
     mockUseStreamStatus(conversationId, enabled),
+  streamStatusQueryKey: (conversationId: string) => ['streamStatus', conversationId],
 }));
 
 const CONVERSATION_ID = 'conv-current';
@@ -60,12 +62,34 @@ function buildSubmission(conversationId: string | null | undefined): TSubmission
   } as unknown as TSubmission;
 }
 
+function buildResumeSubmission(
+  conversationId: string | null | undefined = CONVERSATION_ID,
+  streamId = conversationId ?? CONVERSATION_ID,
+): TSubmission & { resumeStreamId: string } {
+  return {
+    ...buildSubmission(conversationId),
+    resumeStreamId: streamId,
+  } as TSubmission & { resumeStreamId: string };
+}
+
+function createTestQueryClient() {
+  return new QueryClient({
+    defaultOptions: {
+      queries: {
+        retry: false,
+      },
+    },
+  });
+}
+
 function renderUseResumeOnLoad({
   messages = [],
   getMessages: getMessagesOverride,
   submission = null,
   conversationId = CONVERSATION_ID,
   messagesLoaded = true,
+  queryClient = createTestQueryClient(),
+  activeJobIds,
   onSubmission,
   siblingIndexParentId,
   onSiblingIndex,
@@ -75,11 +99,17 @@ function renderUseResumeOnLoad({
   submission?: TSubmission | null;
   conversationId?: string;
   messagesLoaded?: boolean;
+  queryClient?: QueryClient;
+  activeJobIds?: string[];
   onSubmission?: (submission: TSubmission | null) => void;
   siblingIndexParentId?: string;
   onSiblingIndex?: (siblingIndex: number) => void;
 }) {
   const getMessages = jest.fn(getMessagesOverride ?? (() => messages));
+  if (activeJobIds) {
+    queryClient.setQueryData([QueryKeys.activeJobs], { activeJobIds });
+  }
+
   const initializeState = (snapshot: MutableSnapshot) => {
     snapshot.set(store.conversationByIndex(0), buildConversation(conversationId));
     snapshot.set(store.submissionByIndex(0), submission);
@@ -99,15 +129,18 @@ function renderUseResumeOnLoad({
   };
 
   const wrapper = ({ children }: { children: ReactNode }) => (
-    <RecoilRoot initializeState={initializeState}>
-      <SubmissionProbe />
-      <SiblingIndexProbe />
-      {children}
-    </RecoilRoot>
+    <QueryClientProvider client={queryClient}>
+      <RecoilRoot initializeState={initializeState}>
+        <SubmissionProbe />
+        <SiblingIndexProbe />
+        {children}
+      </RecoilRoot>
+    </QueryClientProvider>
   );
 
   return {
     getMessages,
+    queryClient,
     ...renderHook(() => useResumeOnLoad(conversationId, getMessages, 0, messagesLoaded), {
       wrapper,
     }),
@@ -129,13 +162,13 @@ describe('useResumeOnLoad', () => {
     jest.restoreAllMocks();
   });
 
-  it('does not check for resume when a null-conversation submission matches a loaded user message', () => {
+  it('checks stream status when a null-conversation submission matches a loaded user message', () => {
     renderUseResumeOnLoad({
       submission: buildSubmission(null),
       messages: [buildUserMessage(CONVERSATION_ID)],
     });
 
-    expect(mockUseStreamStatus).toHaveBeenCalledWith(CONVERSATION_ID, false);
+    expect(mockUseStreamStatus).toHaveBeenCalledWith(CONVERSATION_ID, true);
   });
 
   it('checks for resume when the active submission belongs to a different conversation', () => {
@@ -156,7 +189,7 @@ describe('useResumeOnLoad', () => {
     expect(mockUseStreamStatus).toHaveBeenCalledWith(CONVERSATION_ID, true);
   });
 
-  it('stops checking for resume after loaded messages prove a null-conversation submission belongs to the route', () => {
+  it('keeps checking status after loaded messages prove a null-conversation submission belongs to the route', () => {
     const submission = buildSubmission(null);
     let messages: TMessage[] = [];
     const { rerender } = renderUseResumeOnLoad({
@@ -169,7 +202,140 @@ describe('useResumeOnLoad', () => {
     messages = [buildUserMessage(CONVERSATION_ID)];
     rerender();
 
-    expect(mockUseStreamStatus).toHaveBeenLastCalledWith(CONVERSATION_ID, false);
+    expect(mockUseStreamStatus).toHaveBeenLastCalledWith(CONVERSATION_ID, true);
+  });
+
+  it('refreshes messages and clears a completed resume submission', async () => {
+    const queryClient = createTestQueryClient();
+    const invalidateSpy = jest.spyOn(queryClient, 'invalidateQueries');
+    const observedSubmissions: Array<TSubmission | null> = [];
+
+    mockUseStreamStatus.mockReturnValue({
+      isSuccess: true,
+      isFetching: false,
+      data: {
+        active: false,
+        status: 'complete',
+      },
+    });
+
+    renderUseResumeOnLoad({
+      queryClient,
+      activeJobIds: [CONVERSATION_ID, 'other-conversation'],
+      submission: buildResumeSubmission(CONVERSATION_ID),
+      messages: [buildUserMessage(CONVERSATION_ID)],
+      onSubmission: (currentSubmission) => observedSubmissions.push(currentSubmission),
+    });
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(invalidateSpy).toHaveBeenCalledWith({
+      queryKey: [QueryKeys.messages, CONVERSATION_ID],
+    });
+    expect(invalidateSpy).toHaveBeenCalledWith({
+      queryKey: [QueryKeys.messages, Constants.NEW_CONVO],
+    });
+    expect(invalidateSpy).toHaveBeenCalledWith({
+      queryKey: [QueryKeys.conversation, CONVERSATION_ID],
+    });
+    expect(invalidateSpy).toHaveBeenCalledWith({
+      queryKey: [QueryKeys.allConversations],
+    });
+    expect(invalidateSpy).toHaveBeenCalledWith({
+      queryKey: ['streamStatus', CONVERSATION_ID],
+    });
+    expect(queryClient.getQueryData<{ activeJobIds: string[] }>([QueryKeys.activeJobs])).toEqual({
+      activeJobIds: ['other-conversation'],
+    });
+    expect(observedSubmissions[observedSubmissions.length - 1]).toBeNull();
+  });
+
+  it('does not clear a fresh local submission when stale stream status is inactive', async () => {
+    const queryClient = createTestQueryClient();
+    const observedSubmissions: Array<TSubmission | null> = [];
+    const submission = buildSubmission(CONVERSATION_ID);
+
+    mockUseStreamStatus.mockReturnValue({
+      isSuccess: true,
+      isFetching: false,
+      data: {
+        active: false,
+        status: 'complete',
+      },
+    });
+
+    renderUseResumeOnLoad({
+      queryClient,
+      activeJobIds: [CONVERSATION_ID],
+      submission,
+      messages: [buildUserMessage(CONVERSATION_ID)],
+      onSubmission: (currentSubmission) => observedSubmissions.push(currentSubmission),
+    });
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(observedSubmissions[observedSubmissions.length - 1]).toBe(submission);
+  });
+
+  it('refreshes completed stream data even after the conversation was processed as active', async () => {
+    const queryClient = createTestQueryClient();
+    const invalidateSpy = jest.spyOn(queryClient, 'invalidateQueries');
+    const observedSubmissions: Array<TSubmission | null> = [];
+    const submission = buildResumeSubmission(CONVERSATION_ID);
+
+    mockUseStreamStatus.mockReturnValueOnce({
+      isSuccess: true,
+      isFetching: false,
+      data: {
+        active: true,
+        status: 'running',
+        streamId: CONVERSATION_ID,
+        resumeState: {
+          aggregatedContent: [],
+          responseMessageId: RESPONSE_MESSAGE_ID,
+          userMessage: { messageId: USER_MESSAGE_ID },
+        },
+      },
+    });
+
+    const { rerender } = renderUseResumeOnLoad({
+      queryClient,
+      activeJobIds: [CONVERSATION_ID],
+      submission,
+      messages: [buildUserMessage(CONVERSATION_ID)],
+      onSubmission: (currentSubmission) => observedSubmissions.push(currentSubmission),
+    });
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    mockUseStreamStatus.mockReturnValue({
+      isSuccess: true,
+      isFetching: false,
+      data: {
+        active: false,
+        status: 'complete',
+      },
+    });
+
+    rerender();
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(invalidateSpy).toHaveBeenCalledWith({
+      queryKey: [QueryKeys.messages, CONVERSATION_ID],
+    });
+    expect(queryClient.getQueryData<{ activeJobIds: string[] }>([QueryKeys.activeJobs])).toEqual({
+      activeJobIds: [],
+    });
+    expect(observedSubmissions[observedSubmissions.length - 1]).toBeNull();
   });
 
   it('does not replace a null-conversation submission when stream status matches its resume state', async () => {

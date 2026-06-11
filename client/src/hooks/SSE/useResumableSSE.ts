@@ -24,7 +24,7 @@ import type {
 } from 'librechat-data-provider';
 import type { EventHandlerParams } from './useEventHandlers';
 import type { ActiveJobsResponse } from '~/data-provider';
-import type { TResData } from '~/common';
+import type { TFinalResData, TResData } from '~/common';
 import {
   clearAllDrafts,
   removeConvoFromAllQueries,
@@ -124,6 +124,111 @@ const waitForRetryDelay = (delay: number, signal?: AbortSignal): Promise<boolean
 
     signal?.addEventListener('abort', onAbort, { once: true });
   });
+
+const CODEX_REVIEW_ENDPOINT = 'codex-review';
+
+const hasAssistantContent = (message?: TMessage | null) =>
+  (typeof message?.text === 'string' && message.text.trim() !== '') ||
+  (Array.isArray(message?.content) && message.content.length > 0) ||
+  (Array.isArray(message?.attachments) && message.attachments.length > 0) ||
+  (Array.isArray(message?.files) && message.files.length > 0);
+
+const isCodexReviewSubmission = (submission: TSubmission) =>
+  submission.endpointOption?.endpoint === CODEX_REVIEW_ENDPOINT ||
+  submission.conversation?.endpoint === CODEX_REVIEW_ENDPOINT;
+
+const markTerminalAssistantMessage = (message: TMessage, conversationId?: string | null) => {
+  const timestamp = message.updatedAt ?? message.createdAt ?? new Date().toISOString();
+  return {
+    ...message,
+    conversationId: message.conversationId ?? conversationId ?? undefined,
+    createdAt: message.createdAt ?? timestamp,
+    updatedAt: message.updatedAt ?? timestamp,
+    unfinished: false,
+  };
+};
+
+export const reconcileCodexReviewFinalMessages = ({
+  messages,
+  userMessage,
+  initialResponse,
+  responseMessage,
+  conversationId,
+}: {
+  messages: TMessage[];
+  userMessage?: TMessage | null;
+  initialResponse?: TMessage | null;
+  responseMessage?: TMessage | null;
+  conversationId?: string | null;
+}): TMessage[] => {
+  if (!userMessage?.messageId || messages.length === 0) {
+    return messages;
+  }
+
+  const userMessageId = userMessage.messageId;
+  const responseMessageId = responseMessage?.messageId;
+  const initialResponseId = initialResponse?.messageId;
+  const defaultResponseId = `${userMessageId}_`;
+  const isPendingCodexResponse = (message: TMessage) =>
+    message.isCreatedByUser !== true &&
+    ((responseMessageId != null && message.messageId === responseMessageId) ||
+      (initialResponseId != null && message.messageId === initialResponseId) ||
+      message.messageId === defaultResponseId ||
+      message.parentMessageId === userMessageId) &&
+    (message.unfinished === true ||
+      message.messageId?.endsWith('_') ||
+      !hasAssistantContent(message));
+
+  if (responseMessage == null) {
+    const filteredMessages = messages.filter((message) => !isPendingCodexResponse(message));
+    return filteredMessages.length === messages.length ? messages : filteredMessages;
+  }
+
+  if (
+    responseMessageId != null &&
+    messages.some(
+      (message) => message.messageId === responseMessageId && message.unfinished !== true,
+    )
+  ) {
+    return messages;
+  }
+
+  const finalResponse = markTerminalAssistantMessage(
+    {
+      ...responseMessage,
+      parentMessageId: responseMessage.parentMessageId ?? userMessageId,
+    },
+    conversationId,
+  );
+  const finalMessages: TMessage[] = [];
+  let inserted = false;
+  let changed = false;
+
+  for (const message of messages) {
+    if (isPendingCodexResponse(message)) {
+      if (!inserted) {
+        finalMessages.push(finalResponse);
+        inserted = true;
+      }
+      changed = true;
+      continue;
+    }
+
+    finalMessages.push(message);
+  }
+
+  if (!inserted) {
+    const userIndex = finalMessages.findIndex((message) => message.messageId === userMessageId);
+    if (userIndex >= 0) {
+      finalMessages.splice(userIndex + 1, 0, finalResponse);
+    } else {
+      finalMessages.push(finalResponse);
+    }
+    changed = true;
+  }
+
+  return changed ? finalMessages : messages;
+};
 
 const hasConcreteConversationId = (conversationId?: string | null) =>
   !!conversationId &&
@@ -353,6 +458,56 @@ const mergeResumeMessages = (
   return [...nextMessages, userMessage, responseMessage];
 };
 
+type CodexReviewProgress = {
+  type?: unknown;
+  message?: unknown;
+  delta?: unknown;
+  count?: unknown;
+  status?: unknown;
+};
+
+const stringifyProgressValue = (value: unknown): string | undefined => {
+  if (typeof value === 'string') {
+    return value.trim() || undefined;
+  }
+  if (typeof value === 'number' || typeof value === 'boolean') {
+    return String(value);
+  }
+  return undefined;
+};
+
+const formatCodexReviewProgressText = (value: unknown): string | undefined => {
+  if (value == null || typeof value !== 'object') {
+    return stringifyProgressValue(value);
+  }
+
+  const data = value as CodexReviewProgress;
+  const type = stringifyProgressValue(data.type);
+  const message = stringifyProgressValue(data.message);
+  if (message) {
+    return message;
+  }
+
+  if (type === 'file_changes') {
+    const count = Number(data.count);
+    return Number.isFinite(count)
+      ? `Detected ${count} changed file(s). Preparing artifacts...`
+      : 'Preparing changed file artifacts...';
+  }
+
+  const status = stringifyProgressValue(data.status);
+  if (status) {
+    return `Status: ${status}`;
+  }
+
+  const delta = stringifyProgressValue(data.delta);
+  if (delta) {
+    return delta;
+  }
+
+  return 'Codex Review is still working...';
+};
+
 /**
  * Hook for resumable SSE streams.
  * Separates generation start (POST) from stream subscription (GET EventSource).
@@ -484,6 +639,49 @@ export default function useResumableSSE(
       let { userMessage } = currentSubmission;
       let textIndex: number | null = null;
       const preCreatedStepEvents: Array<Parameters<typeof stepHandler>[0]> = [];
+      const reconcileCodexReviewFinal = (data: TFinalResData) => {
+        if (!isCodexReviewSubmission(currentSubmission)) {
+          return;
+        }
+
+        const currentMessages = getMessages() ?? [];
+        if (currentMessages.length === 0) {
+          const conversationId =
+            data.conversation?.conversationId ??
+            data.responseMessage?.conversationId ??
+            userMessage?.conversationId ??
+            currentSubmission.conversation?.conversationId;
+          if (conversationId) {
+            queryClient.invalidateQueries({ queryKey: [QueryKeys.messages, conversationId] });
+          }
+          return;
+        }
+
+        const conversationId =
+          data.conversation?.conversationId ??
+          data.responseMessage?.conversationId ??
+          userMessage?.conversationId ??
+          currentSubmission.conversation?.conversationId;
+        const reconciledMessages = reconcileCodexReviewFinalMessages({
+          messages: currentMessages,
+          userMessage: userMessage as TMessage,
+          initialResponse: currentSubmission.initialResponse as TMessage,
+          responseMessage: data.responseMessage as TMessage | undefined,
+          conversationId,
+        });
+
+        if (reconciledMessages === currentMessages) {
+          return;
+        }
+
+        setMessages(reconciledMessages);
+        if (conversationId) {
+          queryClient.setQueryData<TMessage[]>(
+            [QueryKeys.messages, conversationId],
+            reconciledMessages,
+          );
+        }
+      };
       const replayPreCreatedStepEvents = () => {
         if (preCreatedStepEvents.length === 0) {
           return;
@@ -504,6 +702,43 @@ export default function useResumableSSE(
         method: 'GET',
       });
       sseRef.current = sse;
+
+      const updateCodexReviewProgress = (progressData: unknown) => {
+        const progressText = formatCodexReviewProgressText(progressData);
+        if (!progressText || !userMessage?.messageId) {
+          return;
+        }
+
+        const messages = getMessages() ?? [];
+        const userMsgId = userMessage.messageId;
+        const responseId = currentSubmission.initialResponse?.messageId ?? `${userMsgId}_`;
+        let responseMessage =
+          messages.find((message) => message.messageId === responseId) ??
+          messages.find(
+            (message) =>
+              !message.isCreatedByUser &&
+              (message.messageId === `${userMsgId}_` || message.parentMessageId === userMsgId),
+          ) ??
+          (currentSubmission.initialResponse as TMessage);
+
+        responseMessage = {
+          ...responseMessage,
+          messageId: responseMessage?.messageId ?? responseId,
+          parentMessageId: responseMessage?.parentMessageId ?? userMsgId,
+          conversationId:
+            responseMessage?.conversationId ??
+            currentSubmission.conversation?.conversationId ??
+            userMessage.conversationId,
+          isCreatedByUser: false,
+          text: progressText,
+          content: [{ type: 'text', text: progressText }],
+          unfinished: true,
+        } as TMessage;
+
+        setMessages(mergeResumeMessages(messages, userMessage, responseMessage));
+        resetContentHandler();
+        syncStepMessage(responseMessage);
+      };
 
       sse.addEventListener('open', () => {
         console.log('[ResumableSSE] Stream connected');
@@ -535,8 +770,13 @@ export default function useResumableSSE(
               setIsSubmitting(false);
               setShowStopButton(false);
             }
+            reconcileCodexReviewFinal(data);
             // Clear handler maps on stream completion to prevent memory leaks
             clearStepMaps();
+            setIsSubmitting(false);
+            setShowStopButton(false);
+            setSubmission(null);
+            submissionRef.current = null;
             // Optimistically remove from active jobs
             removeActiveJob(currentStreamId);
             (startupConfig?.balance?.enabled ?? false) && balanceQuery.refetch();
@@ -586,6 +826,11 @@ export default function useResumableSSE(
 
           if (data.event === 'title') {
             titleHandler(data);
+            return;
+          }
+
+          if (data.event === 'codex_review_progress') {
+            updateCodexReviewProgress(data.data);
             return;
           }
 
@@ -784,6 +1029,8 @@ export default function useResumableSSE(
           }
           setIsSubmitting(false);
           setShowStopButton(false);
+          setSubmission(null);
+          submissionRef.current = null;
           setStreamId(null);
           optimisticStreamIdsRef.current.delete(currentStreamId);
           createdStreamIdsRef.current.delete(currentStreamId);
@@ -987,6 +1234,7 @@ export default function useResumableSSE(
       clearStepMaps,
       messageHandler,
       errorHandler,
+      setSubmission,
       setIsSubmitting,
       getMessages,
       setMessages,
@@ -1005,11 +1253,30 @@ export default function useResumableSSE(
    */
   const startGeneration = useCallback(
     async (currentSubmission: TSubmission, signal?: AbortSignal): Promise<string | null> => {
-      const payloadData = createPayload(currentSubmission);
-      let { payload } = payloadData;
-      payload = removeNullishValues(payload) as TPayload;
-
       clearStepMaps();
+
+      let payloadData: ReturnType<typeof createPayload>;
+      let payload: TPayload;
+      try {
+        payloadData = createPayload(currentSubmission);
+        payload = removeNullishValues(payloadData.payload) as TPayload;
+      } catch (error) {
+        if (signal?.aborted) {
+          return null;
+        }
+
+        console.error('[ResumableSSE] Error creating generation payload:', error);
+        const message =
+          error instanceof Error ? error.message : 'Failed to create request payload.';
+        errorHandler({
+          data: getStreamStartFailureData({ message }),
+          submission: currentSubmission as EventSubmission,
+        });
+        setShowStopButton(false);
+        setIsSubmitting(false);
+        setSubmission(null);
+        return null;
+      }
 
       const url = payloadData.server;
 
