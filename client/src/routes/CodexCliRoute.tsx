@@ -3,6 +3,7 @@ import { useLocation, useNavigate, useParams } from 'react-router-dom';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { apiBaseUrl, request } from 'librechat-data-provider';
+import copyToClipboard from 'copy-to-clipboard';
 import { useAuthContext } from '~/hooks';
 import '@fontsource/jetbrains-mono/400.css';
 import '@fontsource/jetbrains-mono/700.css';
@@ -42,6 +43,9 @@ const atomOneLightTheme = {
 const terminalFont =
   '"JetBrainsMono Nerd Font Mono", "JetBrains Mono", "Symbols Nerd Font Mono", "Roboto Mono", "SFMono-Regular", "SF Mono", "Cascadia Code", Menlo, Consolas, "Liberation Mono", monospace';
 const terminalFontSize = 14;
+const terminalResponseSuppressMs = 1500;
+const terminalQueryResponsePattern =
+  /^(?:\x1b\[[?>]?[0-9;]*[Rc]|\x1b\](?:10|11);rgb:[0-9a-fA-F]{1,4}\/[0-9a-fA-F]{1,4}\/[0-9a-fA-F]{1,4}(?:\x07|\x1b\\))+$/;
 
 function loadTerminalFonts(fontSize: number) {
   if (typeof document === 'undefined' || !document.fonts) {
@@ -91,6 +95,58 @@ function isValidSessionId(sessionId: string | undefined): sessionId is string {
   return !!sessionId && sessionId !== 'new' && /^[A-Za-z0-9._:-]{1,128}$/.test(sessionId);
 }
 
+function isTerminalShortcut(event: KeyboardEvent, key: string) {
+  return (
+    !event.altKey &&
+    (event.ctrlKey || event.metaKey) &&
+    event.key.toLowerCase() === key
+  );
+}
+
+function installClipboardHandlers(terminal: Terminal, container: HTMLDivElement) {
+  terminal.attachCustomKeyEventHandler((event) => {
+    if (isTerminalShortcut(event, 'c')) {
+      const selection = terminal.getSelection();
+      if (!selection) {
+        return true;
+      }
+      if (event.type === 'keydown') {
+        event.preventDefault();
+        event.stopPropagation();
+        copyToClipboard(selection);
+      }
+      return false;
+    }
+
+    if (isTerminalShortcut(event, 'v')) {
+      if (event.type === 'keydown') {
+        event.stopPropagation();
+      }
+      return false;
+    }
+
+    return true;
+  });
+
+  const handlePaste = (event: ClipboardEvent) => {
+    const text = event.clipboardData?.getData('text/plain');
+    if (!text) {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    terminal.paste(text);
+    terminal.focus();
+  };
+
+  container.addEventListener('paste', handlePaste, true);
+  return () => container.removeEventListener('paste', handlePaste, true);
+}
+
+function isTerminalQueryResponse(data: string) {
+  return terminalQueryResponsePattern.test(data);
+}
+
 export default function CodexCliRoute() {
   const { sessionId } = useParams();
   const location = useLocation();
@@ -102,6 +158,7 @@ export default function CodexCliRoute() {
   const socketRef = useRef<WebSocket | null>(null);
   const reconnectCounter = useRef(0);
   const lastSessionIdRef = useRef<string | null>(null);
+  const suppressTerminalResponsesUntilRef = useRef(0);
 
   const terminalMode: TerminalMode = location.pathname.startsWith('/codex') ? 'codex' : 'shell';
   const routePrefix = terminalMode === 'codex' ? 'codex' : 'terminal';
@@ -266,6 +323,7 @@ export default function CodexCliRoute() {
     terminal.focus();
 
     let disposed = false;
+    const disposeClipboardHandlers = installClipboardHandlers(terminal, container);
     void loadTerminalFonts(terminalFontSize).then(() => {
       if (disposed) {
         return;
@@ -275,6 +333,14 @@ export default function CodexCliRoute() {
     });
 
     const dataDisposable = terminal.onData((data) => {
+      if (data === '\x03') {
+        suppressTerminalResponsesUntilRef.current = Date.now() + terminalResponseSuppressMs;
+      } else if (
+        Date.now() < suppressTerminalResponsesUntilRef.current &&
+        isTerminalQueryResponse(data)
+      ) {
+        return;
+      }
       const socket = socketRef.current;
       if (socket?.readyState === WebSocket.OPEN) {
         socket.send(JSON.stringify({ type: 'input', data }));
@@ -291,6 +357,7 @@ export default function CodexCliRoute() {
       reconnectCounter.current += 1;
       resizeObserver.disconnect();
       dataDisposable.dispose();
+      disposeClipboardHandlers();
       socketRef.current?.close();
       socketRef.current = null;
       terminal.dispose();
