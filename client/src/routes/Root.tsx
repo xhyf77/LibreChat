@@ -29,7 +29,8 @@ export default function Root() {
   const sidebarExpanded = useRecoilValue(store.sidebarExpanded);
   const isSmallScreen = useMediaQuery('(max-width: 768px)');
   const location = useLocation();
-  const isCodexCliRoute = location.pathname.startsWith('/codex');
+  const isTerminalRoute =
+    location.pathname.startsWith('/codex') || location.pathname.startsWith('/terminal');
 
   const { isAuthenticated, logout } = useAuthContext();
 
@@ -74,17 +75,17 @@ export default function Root() {
               <Banner onHeightChange={setBannerHeight} />
               <div className="flex" style={{ height: `calc(100dvh - ${bannerHeight}px)` }}>
                 <div className="relative z-0 flex h-full w-full overflow-hidden">
-                  {!isCodexCliRoute && <UnifiedSidebar />}
+                  {!isTerminalRoute && <UnifiedSidebar />}
                   <div
                     className="relative flex h-full max-w-full flex-1 flex-col overflow-hidden"
                     style={{
                       transform:
-                        !isCodexCliRoute && isSmallScreen && sidebarExpanded
+                        !isTerminalRoute && isSmallScreen && sidebarExpanded
                           ? 'translateX(min(85vw, 380px))'
                           : 'none',
                       transition: 'transform 300ms cubic-bezier(0.2, 0, 0, 1)',
                     }}
-                    inert={!isCodexCliRoute && isSmallScreen && sidebarExpanded ? '' : undefined}
+                    inert={!isTerminalRoute && isSmallScreen && sidebarExpanded ? '' : undefined}
                   >
                     <Outlet />
                   </div>

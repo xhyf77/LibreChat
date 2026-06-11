@@ -23,7 +23,7 @@ const NewChatButton = memo(function NewChatButton({
       if (e.button === 0 && !e.ctrlKey && !e.metaKey) {
         e.preventDefault();
         setActive(DEFAULT_PANEL);
-        navigate('/codex/new');
+        navigate('/terminal/new');
       }
     },
     [navigate, setActive],
@@ -35,7 +35,7 @@ const NewChatButton = memo(function NewChatButton({
       description={localize('com_ui_new_chat')}
       render={
         <a
-          href="/codex/new"
+          href="/terminal/new"
           data-testid="new-chat-button"
           aria-label={localize('com_ui_new_chat')}
           className="flex h-9 w-9 items-center justify-center rounded-lg transition-colors hover:bg-surface-hover"

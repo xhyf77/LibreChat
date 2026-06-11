@@ -124,7 +124,11 @@ export const router = createBrowserRouter(
           children: [
             {
               index: true,
-              element: <Navigate to="/codex/new" replace={true} />,
+              element: <Navigate to="/terminal/new" replace={true} />,
+            },
+            {
+              path: 'terminal/:sessionId?',
+              element: <CodexCliRoute />,
             },
             {
               path: 'codex/:sessionId?',
@@ -132,7 +136,7 @@ export const router = createBrowserRouter(
             },
             {
               path: 'c/:conversationId?',
-              element: <Navigate to="/codex/new" replace={true} />,
+              element: <Navigate to="/terminal/new" replace={true} />,
             },
             {
               path: 'search',

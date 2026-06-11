@@ -17,7 +17,7 @@ const dashboardRoutes = {
     },
     {
       path: '*',
-      element: <Navigate to="/codex/new" replace={true} />,
+      element: <Navigate to="/terminal/new" replace={true} />,
     },
   ],
 };

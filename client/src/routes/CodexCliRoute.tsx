@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef } from 'react';
-import { useNavigate, useParams } from 'react-router-dom';
+import { useLocation, useNavigate, useParams } from 'react-router-dom';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { apiBaseUrl, request } from 'librechat-data-provider';
@@ -12,6 +12,8 @@ type TicketResponse = {
   ticket: string;
   expiresAt: string;
 };
+
+type TerminalMode = 'shell' | 'codex';
 
 const atomOneLightTheme = {
   background: '#fafafa',
@@ -50,11 +52,13 @@ function createSessionId() {
 function buildWebSocketUrl({
   ticket,
   sessionId,
+  mode,
   cols,
   rows,
 }: {
   ticket: string;
   sessionId: string;
+  mode: TerminalMode;
   cols: number;
   rows: number;
 }) {
@@ -65,6 +69,7 @@ function buildWebSocketUrl({
   url.protocol = protocol;
   url.searchParams.set('ticket', ticket);
   url.searchParams.set('sessionId', sessionId);
+  url.searchParams.set('mode', mode);
   url.searchParams.set('cols', String(cols));
   url.searchParams.set('rows', String(rows));
   return url.toString();
@@ -76,6 +81,7 @@ function isValidSessionId(sessionId: string | undefined): sessionId is string {
 
 export default function CodexCliRoute() {
   const { sessionId } = useParams();
+  const location = useLocation();
   const navigate = useNavigate();
   const { isAuthenticated, token } = useAuthContext();
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -84,6 +90,9 @@ export default function CodexCliRoute() {
   const socketRef = useRef<WebSocket | null>(null);
   const reconnectCounter = useRef(0);
   const lastSessionIdRef = useRef<string | null>(null);
+
+  const terminalMode: TerminalMode = location.pathname.startsWith('/codex') ? 'codex' : 'shell';
+  const routePrefix = terminalMode === 'codex' ? 'codex' : 'terminal';
 
   const activeSessionId = useMemo(() => {
     if (isValidSessionId(sessionId)) {
@@ -96,16 +105,17 @@ export default function CodexCliRoute() {
     if (activeSessionId) {
       return;
     }
-    navigate(`/codex/${createSessionId()}`, { replace: true });
-  }, [activeSessionId, navigate]);
+    navigate(`/${routePrefix}/${createSessionId()}`, { replace: true });
+  }, [activeSessionId, navigate, routePrefix]);
 
   useEffect(() => {
-    if (!activeSessionId || lastSessionIdRef.current === activeSessionId) {
+    const terminalKey = activeSessionId ? `${terminalMode}:${activeSessionId}` : null;
+    if (!activeSessionId || lastSessionIdRef.current === terminalKey) {
       return;
     }
-    lastSessionIdRef.current = activeSessionId;
+    lastSessionIdRef.current = terminalKey;
     terminalRef.current?.reset();
-  }, [activeSessionId]);
+  }, [activeSessionId, terminalMode]);
 
   const fitAndNotify = useCallback(() => {
     const fitAddon = fitAddonRef.current;
@@ -145,7 +155,7 @@ export default function CodexCliRoute() {
     try {
       ticketResponse = await request.post(`${apiBaseUrl()}/api/codex-cli/ticket`, {});
     } catch {
-      terminalRef.current?.writeln('\r\n[web terminal] failed to open Codex CLI session\r\n');
+      terminalRef.current?.writeln('\r\n[web terminal] failed to open terminal session\r\n');
       return;
     }
 
@@ -158,6 +168,7 @@ export default function CodexCliRoute() {
     const url = buildWebSocketUrl({
       ticket: ticketResponse.ticket,
       sessionId: activeSessionId,
+      mode: terminalMode,
       cols: terminal.cols,
       rows: terminal.rows,
     });
@@ -179,6 +190,7 @@ export default function CodexCliRoute() {
         data?: string;
         pid?: number;
         cwd?: string;
+        mode?: TerminalMode;
         exitCode?: number;
         signal?: number;
       };
@@ -196,7 +208,7 @@ export default function CodexCliRoute() {
         return;
       }
       if (message.type === 'exit') {
-        terminal.writeln('\r\n[Codex CLI exited]\r\n');
+        terminal.writeln('\r\n[terminal exited]\r\n');
       }
     });
 
@@ -211,7 +223,7 @@ export default function CodexCliRoute() {
         terminalRef.current?.writeln('\r\n[web terminal connection error]\r\n');
       }
     });
-  }, [activeSessionId, fitAndNotify, isAuthenticated, token]);
+  }, [activeSessionId, fitAndNotify, isAuthenticated, terminalMode, token]);
 
   useEffect(() => {
     const container = containerRef.current;

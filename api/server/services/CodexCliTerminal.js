@@ -31,6 +31,29 @@ function getCodexBin() {
   return process.env.CODEX_CLI_BIN || 'codex';
 }
 
+function getShellBin() {
+  return process.env.WEB_TERMINAL_SHELL || process.env.SHELL || '/bin/zsh';
+}
+
+function getShellArgs(shellBin) {
+  const shellName = path.basename(shellBin);
+  if (shellName === 'bash' || shellName === 'zsh') {
+    return ['-l'];
+  }
+  return [];
+}
+
+function shellQuote(value) {
+  return `'${String(value).replaceAll("'", "'\\''")}'`;
+}
+
+function normalizeMode(value) {
+  if (value === 'codex') {
+    return 'codex';
+  }
+  return 'shell';
+}
+
 function normalizeUserId(user) {
   return user?.id?.toString?.() || user?._id?.toString?.() || '';
 }
@@ -113,9 +136,10 @@ function clampTerminalSize(value, fallback, min, max) {
 }
 
 class CodexCliSession {
-  constructor({ sessionId, userId, cols, rows }) {
+  constructor({ sessionId, userId, mode, cols, rows }) {
     this.sessionId = sessionId;
     this.userId = userId;
+    this.mode = mode;
     this.repoPath = getRepoPath();
     this.buffer = '';
     this.clients = new Set();
@@ -131,17 +155,10 @@ class CodexCliSession {
     };
     delete env.NO_COLOR;
 
-    const args = [
-      '--no-alt-screen',
-      '-C',
-      this.repoPath,
-      '-s',
-      'danger-full-access',
-      '-a',
-      'never',
-    ];
+    const shellBin = getShellBin();
+    const shellArgs = getShellArgs(shellBin);
 
-    this.ptyProcess = pty.spawn(getCodexBin(), args, {
+    this.ptyProcess = pty.spawn(shellBin, shellArgs, {
       name: 'xterm-256color',
       cols,
       rows,
@@ -164,6 +181,7 @@ class CodexCliSession {
       sessions.delete(this.sessionId);
       logger.info('[CodexCliTerminal] PTY exited', {
         sessionId: this.sessionId,
+        mode: this.mode,
         pid: this.ptyProcess.pid,
         ...this.exitInfo,
       });
@@ -171,9 +189,27 @@ class CodexCliSession {
 
     logger.info('[CodexCliTerminal] PTY started', {
       sessionId: this.sessionId,
+      mode: this.mode,
       pid: this.ptyProcess.pid,
       cwd: this.repoPath,
+      shell: shellBin,
     });
+
+    if (this.mode === 'codex') {
+      const command = [
+        shellQuote(getCodexBin()),
+        '--no-alt-screen',
+        '-C',
+        shellQuote(this.repoPath),
+        '-s',
+        'danger-full-access',
+        '-a',
+        'never',
+      ].join(' ');
+      setTimeout(() => {
+        this.write(`${command}\r`);
+      }, 100);
+    }
   }
 
   appendBuffer(data) {
@@ -195,6 +231,7 @@ class CodexCliSession {
     wsSend(ws, {
       type: 'ready',
       sessionId: this.sessionId,
+      mode: this.mode,
       pid: this.ptyProcess.pid,
       cwd: this.repoPath,
     });
@@ -261,24 +298,27 @@ class CodexCliSession {
   }
 }
 
-function getOrCreateSession({ sessionId, userId, cols, rows }) {
+function getOrCreateSession({ sessionId, userId, mode, cols, rows }) {
   const existing = sessions.get(sessionId);
   if (existing) {
     if (existing.userId !== userId) {
       throw new Error('Codex CLI session belongs to another user.');
     }
+    if (existing.mode !== mode) {
+      throw new Error('Codex CLI session mode mismatch.');
+    }
     return existing;
   }
-  const session = new CodexCliSession({ sessionId, userId, cols, rows });
+  const session = new CodexCliSession({ sessionId, userId, mode, cols, rows });
   sessions.set(sessionId, session);
   return session;
 }
 
 function handleWsConnection(ws, params) {
-  const { userId, sessionId, cols, rows } = params;
+  const { userId, sessionId, mode, cols, rows } = params;
   let session;
   try {
-    session = getOrCreateSession({ sessionId, userId, cols, rows });
+    session = getOrCreateSession({ sessionId, userId, mode, cols, rows });
     session.attach(ws);
   } catch (error) {
     logger.warn('[CodexCliTerminal] WebSocket attach failed', {
@@ -359,11 +399,13 @@ function attachCodexCliTerminal(server) {
 
     const cols = clampTerminalSize(url.searchParams.get('cols'), 120, 20, 300);
     const rows = clampTerminalSize(url.searchParams.get('rows'), 36, 8, 120);
+    const mode = normalizeMode(url.searchParams.get('mode'));
 
     websocketServer.handleUpgrade(request, socket, head, (ws) => {
       websocketServer.emit('connection', ws, request, {
         userId: ticket.userId,
         sessionId,
+        mode,
         cols,
         rows,
       });
@@ -391,6 +433,7 @@ function attachCodexCliTerminal(server) {
 function getCodexCliSessions() {
   return [...sessions.values()].map((session) => ({
     sessionId: session.sessionId,
+    mode: session.mode,
     pid: session.ptyProcess.pid,
     cwd: session.repoPath,
     exited: session.exited,

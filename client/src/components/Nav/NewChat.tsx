@@ -9,10 +9,10 @@ export default function NewChat({ className }: { className?: string }) {
 
   const clickHandler: React.MouseEventHandler<HTMLButtonElement> = (e) => {
     if (e.button === 0 && (e.ctrlKey || e.metaKey)) {
-      window.open('/codex/new', '_blank');
+      window.open('/terminal/new', '_blank');
       return;
     }
-    navigate('/codex/new');
+    navigate('/terminal/new');
   };
 
   return (
