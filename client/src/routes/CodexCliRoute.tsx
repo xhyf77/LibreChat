@@ -40,7 +40,19 @@ const atomOneLightTheme = {
 };
 
 const terminalFont =
-  '"JetBrains Mono", "Symbols Nerd Font Mono", "Roboto Mono", "SFMono-Regular", "SF Mono", "Cascadia Code", Menlo, Consolas, "Liberation Mono", monospace';
+  '"JetBrainsMono Nerd Font Mono", "JetBrains Mono", "Symbols Nerd Font Mono", "Roboto Mono", "SFMono-Regular", "SF Mono", "Cascadia Code", Menlo, Consolas, "Liberation Mono", monospace';
+const terminalFontSize = 14;
+
+function loadTerminalFonts(fontSize: number) {
+  if (typeof document === 'undefined' || !document.fonts) {
+    return Promise.resolve();
+  }
+  return Promise.allSettled([
+    document.fonts.load(`400 ${fontSize}px "JetBrainsMono Nerd Font Mono"`),
+    document.fonts.load(`700 ${fontSize}px "JetBrainsMono Nerd Font Mono"`),
+    document.fonts.load(`400 ${fontSize}px "Symbols Nerd Font Mono"`),
+  ]).then(() => undefined);
+}
 
 function createSessionId() {
   if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) {
@@ -237,7 +249,7 @@ export default function CodexCliRoute() {
       cursorBlink: true,
       cursorStyle: 'block',
       fontFamily: terminalFont,
-      fontSize: 14,
+      fontSize: terminalFontSize,
       fontWeight: 400,
       fontWeightBold: 700,
       lineHeight: 1.18,
@@ -253,6 +265,15 @@ export default function CodexCliRoute() {
     fitAndNotify();
     terminal.focus();
 
+    let disposed = false;
+    void loadTerminalFonts(terminalFontSize).then(() => {
+      if (disposed) {
+        return;
+      }
+      fitAndNotify();
+      terminal.refresh(0, terminal.rows - 1);
+    });
+
     const dataDisposable = terminal.onData((data) => {
       const socket = socketRef.current;
       if (socket?.readyState === WebSocket.OPEN) {
@@ -266,6 +287,7 @@ export default function CodexCliRoute() {
     resizeObserver.observe(container);
 
     return () => {
+      disposed = true;
       reconnectCounter.current += 1;
       resizeObserver.disconnect();
       dataDisposable.dispose();
