@@ -40,7 +40,7 @@ const atomOneLightTheme = {
 };
 
 const terminalFont =
-  '"JetBrains Mono", "Roboto Mono", "SFMono-Regular", "SF Mono", "Cascadia Code", Menlo, Consolas, "Liberation Mono", monospace';
+  '"JetBrains Mono", "Symbols Nerd Font Mono", "Roboto Mono", "SFMono-Regular", "SF Mono", "Cascadia Code", Menlo, Consolas, "Liberation Mono", monospace';
 
 function createSessionId() {
   if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) {
