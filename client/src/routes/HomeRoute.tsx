@@ -65,6 +65,10 @@ const diffQuickLinks = [
   { label: 'Paste import', href: '/diff/import' },
 ];
 
+function terminalSessionHref(session: TerminalSession) {
+  return `/${session.mode === 'codex' ? 'codex' : 'terminal'}/${session.sessionId}`;
+}
+
 export default function HomeRoute() {
   const { user } = useAuthContext();
   const [sessions, setSessions] = useState<TerminalSession[]>([]);
@@ -201,13 +205,14 @@ export default function HomeRoute() {
                 <div className="space-y-2">
                   {sessions.map((session) => {
                     const isEnding = endingSessionIds.has(session.sessionId);
+                    const sessionHref = terminalSessionHref(session);
                     return (
                       <div
                         key={session.sessionId}
                         className="grid gap-3 rounded-md border border-[#e4e4e7] bg-[#fafafa] p-3 sm:grid-cols-[minmax(0,1fr)_auto]"
                       >
                         <Link
-                          to={`/terminal/${session.sessionId}`}
+                          to={sessionHref}
                           className="min-w-0 rounded-sm focus:outline-none focus-visible:ring-2 focus-visible:ring-[#4078f2]"
                         >
                           <div className="flex min-w-0 items-center gap-2">
@@ -225,7 +230,7 @@ export default function HomeRoute() {
                         </Link>
                         <div className="flex items-center justify-end gap-2">
                           <Link
-                            to={`/terminal/${session.sessionId}`}
+                            to={sessionHref}
                             className="inline-flex h-8 items-center justify-center rounded-md border border-[#d9d9dc] bg-white px-3 text-xs font-medium text-[#2f5fbe] transition-colors hover:border-[#b8bbc3] focus:outline-none focus-visible:ring-2 focus-visible:ring-[#4078f2]"
                           >
                             Open

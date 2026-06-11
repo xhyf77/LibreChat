@@ -430,31 +430,24 @@ function attachCodexCliTerminal(server) {
   return websocketServer;
 }
 
-function getCodexCliSessions(user) {
-  const userId = normalizeUserId(user);
-  return [...sessions.values()]
-    .filter((session) => !userId || session.userId === userId)
-    .map((session) => ({
-      sessionId: session.sessionId,
-      mode: session.mode,
-      pid: session.ptyProcess.pid,
-      cwd: session.repoPath,
-      exited: session.exited,
-      clients: session.clients.size,
-    }));
+function getCodexCliSessions() {
+  return [...sessions.values()].map((session) => ({
+    sessionId: session.sessionId,
+    mode: session.mode,
+    pid: session.ptyProcess.pid,
+    cwd: session.repoPath,
+    exited: session.exited,
+    clients: session.clients.size,
+  }));
 }
 
-function terminateCodexCliSession(sessionId, user) {
+function terminateCodexCliSession(sessionId) {
   const normalized = normalizeSessionId(sessionId);
   if (!normalized) {
     return false;
   }
   const session = sessions.get(normalized);
   if (!session) {
-    return false;
-  }
-  const userId = normalizeUserId(user);
-  if (userId && session.userId !== userId) {
     return false;
   }
   session.terminate();

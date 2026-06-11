@@ -13,12 +13,12 @@ router.post('/ticket', (req, res) => {
   res.json(createCodexCliTicket(req.user));
 });
 
-router.get('/sessions', (req, res) => {
-  res.json({ sessions: getCodexCliSessions(req.user) });
+router.get('/sessions', (_req, res) => {
+  res.json({ sessions: getCodexCliSessions() });
 });
 
 router.delete('/sessions/:sessionId', (req, res) => {
-  res.json({ ok: terminateCodexCliSession(req.params.sessionId, req.user) });
+  res.json({ ok: terminateCodexCliSession(req.params.sessionId) });
 });
 
 module.exports = router;
