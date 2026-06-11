@@ -55,11 +55,13 @@ const staticCache = require('./utils/staticCache');
 const noIndex = require('./middleware/noIndex');
 const routes = require('./routes');
 
-const { PORT, HOST, ALLOW_SOCIAL_LOGIN, DISABLE_COMPRESSION, TRUST_PROXY } = process.env ?? {};
+const { PORT, HOST, LISTEN_SOCKET, ALLOW_SOCIAL_LOGIN, DISABLE_COMPRESSION, TRUST_PROXY } =
+  process.env ?? {};
 
 // Allow PORT=0 to be used for automatic free port assignment
 const port = isNaN(Number(PORT)) ? 3080 : Number(PORT);
 const host = HOST || 'localhost';
+const listenSocket = LISTEN_SOCKET || '';
 const trusted_proxy = Number(TRUST_PROXY) || 1; /* trust first proxy by default */
 
 const app = express();
@@ -296,13 +298,25 @@ const startServer = async () => {
 
   configureGenerationStreams();
 
-  const server = app.listen(port, host, async (err) => {
+  if (listenSocket) {
+    fs.rmSync(listenSocket, { force: true });
+  }
+
+  const listenArgs = listenSocket ? [listenSocket] : [port, host];
+  const server = app.listen(...listenArgs, async (err) => {
     if (err) {
       logger.error('Failed to start server:', err);
       process.exit(1);
     }
 
-    if (host === '0.0.0.0') {
+    if (listenSocket) {
+      try {
+        fs.chmodSync(listenSocket, 0o600);
+      } catch (error) {
+        logger.warn('Failed to chmod LISTEN_SOCKET', { error: error.message, listenSocket });
+      }
+      logger.info(`Server listening on unix socket ${listenSocket}`);
+    } else if (host === '0.0.0.0') {
       logger.info(
         `Server listening on all interfaces at port ${port}. Use http://localhost:${port} to access it`,
       );

@@ -1,3 +1,4 @@
+const http = require('http');
 const fetch = require('node-fetch');
 
 const DEFAULT_API_BASE = 'http://127.0.0.1:8000/api';
@@ -9,6 +10,7 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 class CodexReviewSidecar {
   constructor(env = process.env) {
     this.apiBase = (env.CODEX_REVIEW_API_BASE || DEFAULT_API_BASE).replace(/\/+$/, '');
+    this.socketPath = env.CODEX_REVIEW_API_SOCKET || '';
     this.projectId = env.CODEX_REVIEW_PROJECT_ID || DEFAULT_PROJECT_ID;
     this.staticToken = env.CODEX_REVIEW_API_TOKEN || '';
     this.adminUser = env.CODEX_REVIEW_ADMIN_USER || '';
@@ -247,7 +249,7 @@ class CodexReviewSidecar {
     if (token) {
       headers.Authorization = `Bearer ${token}`;
     }
-    const response = await fetch(`${this.apiBase}${path}`, {
+    const response = await this.fetch(`${this.apiBase}${path}`, {
       method: 'GET',
       headers,
       signal,
@@ -271,7 +273,7 @@ class CodexReviewSidecar {
     if (token) {
       headers.Authorization = `Bearer ${token}`;
     }
-    const response = await fetch(`${this.apiBase}${path}`, {
+    const response = await this.fetch(`${this.apiBase}${path}`, {
       method,
       headers,
       body: body === undefined ? undefined : JSON.stringify(body),
@@ -309,7 +311,7 @@ class CodexReviewSidecar {
     if (this.cachedToken && now < this.tokenExpiresAt - 60_000) {
       return this.cachedToken;
     }
-    const response = await fetch(`${this.apiBase}/auth/login`, {
+    const response = await this.fetch(`${this.apiBase}/auth/login`, {
       method: 'POST',
       headers: {
         Accept: 'application/json',
@@ -329,6 +331,48 @@ class CodexReviewSidecar {
     this.tokenExpiresAt = Date.parse(json.expires_at || '') || now + 30 * 60_000;
     return this.cachedToken;
   }
+
+  async fetch(url, options = {}) {
+    if (!this.socketPath) {
+      return fetch(url, options);
+    }
+    return fetchUnixSocket(url, options, this.socketPath);
+  }
+}
+
+function fetchUnixSocket(url, options, socketPath) {
+  const target = new URL(url);
+  return new Promise((resolve, reject) => {
+    const req = http.request(
+      {
+        socketPath,
+        method: options.method || 'GET',
+        path: `${target.pathname}${target.search}`,
+        headers: options.headers,
+        signal: options.signal,
+      },
+      (res) => {
+        res.status = res.statusCode || 0;
+        res.ok = res.status >= 200 && res.status < 300;
+        res.statusText = res.statusMessage || '';
+        res.body = res;
+        res.text = () =>
+          new Promise((resolveText, rejectText) => {
+            const chunks = [];
+            res.on('data', (chunk) => chunks.push(Buffer.from(chunk)));
+            res.on('end', () => resolveText(Buffer.concat(chunks).toString('utf8')));
+            res.on('error', rejectText);
+          });
+        resolve(res);
+      },
+    );
+    req.on('error', reject);
+    if (options.body === undefined) {
+      req.end();
+    } else {
+      req.end(options.body);
+    }
+  });
 }
 
 module.exports = {
