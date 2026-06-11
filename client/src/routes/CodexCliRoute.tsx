@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useMemo, useRef } from 'react';
-import { useLocation, useNavigate, useParams } from 'react-router-dom';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Link, useLocation, useNavigate, useParams } from 'react-router-dom';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { apiBaseUrl, request } from 'librechat-data-provider';
@@ -15,6 +15,11 @@ type TicketResponse = {
 };
 
 type TerminalMode = 'shell' | 'codex';
+
+type TerminalExitInfo = {
+  exitCode?: number;
+  signal?: number;
+};
 
 const atomOneLightTheme = {
   background: '#fafafa',
@@ -159,6 +164,8 @@ export default function CodexCliRoute() {
   const reconnectCounter = useRef(0);
   const lastSessionIdRef = useRef<string | null>(null);
   const suppressTerminalResponsesUntilRef = useRef(0);
+  const hasExitedRef = useRef(false);
+  const [exitInfo, setExitInfo] = useState<TerminalExitInfo | null>(null);
 
   const terminalMode: TerminalMode = location.pathname.startsWith('/codex') ? 'codex' : 'shell';
   const routePrefix = terminalMode === 'codex' ? 'codex' : 'terminal';
@@ -183,6 +190,8 @@ export default function CodexCliRoute() {
       return;
     }
     lastSessionIdRef.current = terminalKey;
+    hasExitedRef.current = false;
+    setExitInfo(null);
     terminalRef.current?.reset();
   }, [activeSessionId, terminalMode]);
 
@@ -216,6 +225,8 @@ export default function CodexCliRoute() {
 
     reconnectCounter.current += 1;
     const connectionId = reconnectCounter.current;
+    hasExitedRef.current = false;
+    setExitInfo(null);
 
     socketRef.current?.close();
     socketRef.current = null;
@@ -277,12 +288,22 @@ export default function CodexCliRoute() {
         return;
       }
       if (message.type === 'exit') {
+        hasExitedRef.current = true;
+        setExitInfo({
+          exitCode: message.exitCode,
+          signal: message.signal,
+        });
         terminal.writeln('\r\n[terminal exited]\r\n');
+        socket.close();
       }
     });
 
     socket.addEventListener('close', () => {
-      if (connectionId === reconnectCounter.current && terminalRef.current) {
+      if (
+        connectionId === reconnectCounter.current &&
+        terminalRef.current &&
+        !hasExitedRef.current
+      ) {
         terminalRef.current.writeln('\r\n[web terminal disconnected]\r\n');
       }
     });
@@ -333,6 +354,9 @@ export default function CodexCliRoute() {
     });
 
     const dataDisposable = terminal.onData((data) => {
+      if (hasExitedRef.current) {
+        return;
+      }
       if (data === '\x03') {
         suppressTerminalResponsesUntilRef.current = Date.now() + terminalResponseSuppressMs;
       } else if (
@@ -375,6 +399,33 @@ export default function CodexCliRoute() {
       <section className="min-h-0 flex-1 overflow-hidden" onClick={() => terminalRef.current?.focus()}>
         <div ref={containerRef} className="codex-cli-terminal h-full w-full" />
       </section>
+      {exitInfo && (
+        <div className="pointer-events-none fixed inset-x-0 bottom-5 z-50 flex justify-center px-4">
+          <div className="pointer-events-auto flex w-full max-w-lg flex-col gap-3 rounded-lg border border-[#d9d9dc] bg-white p-4 text-[#383a42] shadow-lg sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <p className="text-sm font-semibold text-[#202227]">Terminal exited</p>
+              <p className="mt-1 text-xs text-[#696c77]">
+                exit {exitInfo.exitCode ?? 'unknown'}
+                {exitInfo.signal ? ` · signal ${exitInfo.signal}` : ''}
+              </p>
+            </div>
+            <div className="flex items-center gap-2">
+              <Link
+                to="/"
+                className="inline-flex h-9 items-center justify-center rounded-md border border-[#d9d9dc] bg-white px-3 text-sm font-medium text-[#383a42] transition-colors hover:border-[#b8bbc3] hover:bg-[#fafafa] focus:outline-none focus-visible:ring-2 focus-visible:ring-[#4078f2]"
+              >
+                Home
+              </Link>
+              <Link
+                to={`/${routePrefix}/new`}
+                className="inline-flex h-9 items-center justify-center rounded-md bg-[#4078f2] px-3 text-sm font-medium text-white transition-colors hover:bg-[#2f5fbe] focus:outline-none focus-visible:ring-2 focus-visible:ring-[#4078f2] focus-visible:ring-offset-2"
+              >
+                New terminal
+              </Link>
+            </div>
+          </div>
+        </div>
+      )}
     </main>
   );
 }

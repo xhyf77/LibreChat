@@ -1,57 +1,124 @@
+import { useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import {
   ArrowRight,
   FileDiff,
   GitCommitHorizontal,
   GitCompare,
+  Loader2,
+  MonitorUp,
+  Power,
+  RefreshCw,
   ShieldCheck,
   TerminalSquare,
-  Workflow,
 } from 'lucide-react';
+import { apiBaseUrl, request } from 'librechat-data-provider';
 import { useAuthContext } from '~/hooks';
 
 const repoPath = '~/fjj/hm_os/hm-verif-kernel';
+const terminalPollIntervalMs = 4000;
 
-const primaryActions = [
-  {
-    title: 'Server Terminal',
-    description: 'A browser tab maps to a live PTY on the server.',
-    href: '/terminal/new',
-    label: 'Open terminal',
-    Icon: TerminalSquare,
-    accent: 'text-blue-600 bg-blue-500/10',
-  },
-  {
-    title: 'Codex CLI',
-    description: 'Start Codex inside the same server workspace.',
-    href: '/codex/new',
-    label: 'Open Codex',
-    Icon: Workflow,
-    accent: 'text-emerald-600 bg-emerald-500/10',
-  },
-];
+type TerminalSession = {
+  sessionId: string;
+  mode: 'shell' | 'codex';
+  pid: number;
+  cwd: string;
+  exited: boolean;
+  clients: number;
+};
 
-const diffItems = [
+type TerminalSessionsResponse = {
+  sessions: TerminalSession[];
+};
+
+type TerminalActionResponse = {
+  ok: boolean;
+};
+
+const diffRoutes = [
   {
-    title: 'Diff view',
-    description: 'Review current repository changes with a focused diff surface.',
+    title: 'Single-column diff',
+    description: 'Review the current workspace changes with diff2html.',
+    href: '/diff/',
+    label: 'Open diff',
     Icon: GitCompare,
   },
   {
-    title: 'File workspace',
-    description: 'Open changed files, inspect latest content, and copy clean source text.',
+    title: 'File editor',
+    description: 'Search, preview, edit, copy, and save repo files.',
+    href: '/diff/file',
+    label: 'Edit files',
     Icon: FileDiff,
   },
   {
     title: 'Commit flow',
-    description: 'Stage selected files and create local commits without pushing upstream.',
+    description: 'Select files, preview staged diff, add, and commit locally.',
+    href: '/diff/commit',
+    label: 'Open commit',
     Icon: GitCommitHorizontal,
   },
 ];
 
+const diffQuickLinks = [
+  { label: 'Project explorer', href: '/diff/explorer' },
+  { label: 'Split diff', href: '/diff/split' },
+  { label: 'Paste import', href: '/diff/import' },
+];
+
 export default function HomeRoute() {
   const { user } = useAuthContext();
+  const [sessions, setSessions] = useState<TerminalSession[]>([]);
+  const [isLoadingSessions, setIsLoadingSessions] = useState(true);
+  const [sessionError, setSessionError] = useState<string | null>(null);
+  const [endingSessionIds, setEndingSessionIds] = useState<Set<string>>(() => new Set());
   const displayName = user?.name || user?.username || user?.email || 'xieminhui';
+
+  const refreshSessions = useCallback(async (showLoading = false) => {
+    if (showLoading) {
+      setIsLoadingSessions(true);
+    }
+    setSessionError(null);
+    try {
+      const data = await request.get<TerminalSessionsResponse>(
+        `${apiBaseUrl()}/api/codex-cli/sessions`,
+      );
+      setSessions((data.sessions ?? []).filter((session) => !session.exited));
+    } catch {
+      setSessionError('Unable to load terminals');
+    } finally {
+      setIsLoadingSessions(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void refreshSessions(true);
+    const interval = window.setInterval(() => {
+      void refreshSessions();
+    }, terminalPollIntervalMs);
+    return () => window.clearInterval(interval);
+  }, [refreshSessions]);
+
+  const endSession = useCallback(
+    async (sessionId: string) => {
+      setEndingSessionIds((current) => new Set(current).add(sessionId));
+      try {
+        await request.delete<TerminalActionResponse>(
+          `${apiBaseUrl()}/api/codex-cli/sessions/${encodeURIComponent(sessionId)}`,
+        );
+        setSessions((current) => current.filter((session) => session.sessionId !== sessionId));
+        window.setTimeout(() => {
+          void refreshSessions();
+        }, 500);
+      } finally {
+        setEndingSessionIds((current) => {
+          const next = new Set(current);
+          next.delete(sessionId);
+          return next;
+        });
+      }
+    },
+    [refreshSessions],
+  );
 
   return (
     <main className="min-h-full overflow-auto bg-[#fafafa] text-[#383a42]">
@@ -71,31 +138,119 @@ export default function HomeRoute() {
           </div>
           <div className="flex flex-wrap items-center gap-2 text-xs text-[#696c77]">
             <span className="rounded-md border border-[#d9d9dc] bg-white px-2.5 py-1">PTY native</span>
-            <span className="rounded-md border border-[#d9d9dc] bg-white px-2.5 py-1">Codex CLI</span>
+            <span className="rounded-md border border-[#d9d9dc] bg-white px-2.5 py-1">Server terminal</span>
             <span className="rounded-md border border-[#d9d9dc] bg-white px-2.5 py-1">Local git</span>
           </div>
         </section>
 
-        <section className="grid gap-4 md:grid-cols-2">
-          {primaryActions.map(({ title, description, href, label, Icon, accent }) => (
-            <Link
-              key={title}
-              to={href}
-              className="group flex min-h-[172px] flex-col justify-between rounded-lg border border-[#d9d9dc] bg-white p-5 shadow-sm transition-colors hover:border-[#b8bbc3] hover:bg-[#fbfbfb] focus:outline-none focus-visible:ring-2 focus-visible:ring-[#4078f2]"
-            >
+        <section className="grid gap-4 lg:grid-cols-[minmax(0,0.9fr)_minmax(380px,1.1fr)]">
+          <Link
+            to="/terminal/new"
+            className="group flex min-h-[232px] flex-col justify-between rounded-lg border border-[#d9d9dc] bg-white p-5 shadow-sm transition-colors hover:border-[#b8bbc3] hover:bg-[#fbfbfb] focus:outline-none focus-visible:ring-2 focus-visible:ring-[#4078f2]"
+          >
+            <div>
+              <div className="mb-5 flex size-10 items-center justify-center rounded-md bg-blue-500/10 text-blue-600">
+                <TerminalSquare className="size-5" aria-hidden="true" />
+              </div>
+              <h2 className="text-lg font-semibold text-[#202227]">New server terminal</h2>
+              <p className="mt-2 text-sm leading-6 text-[#5f626b]">
+                Start a fresh PTY in the server workspace. Each browser tab maps to one live terminal.
+              </p>
+            </div>
+            <div className="mt-5 flex items-center gap-2 text-sm font-medium text-[#2f5fbe]">
+              Open terminal
+              <ArrowRight className="size-4 transition-transform group-hover:translate-x-0.5" aria-hidden="true" />
+            </div>
+          </Link>
+
+          <section className="rounded-lg border border-[#d9d9dc] bg-white p-5 shadow-sm">
+            <div className="flex items-start justify-between gap-3 border-b border-[#e4e4e7] pb-4">
               <div>
-                <div className={`mb-5 flex size-10 items-center justify-center rounded-md ${accent}`}>
-                  <Icon className="size-5" aria-hidden="true" />
+                <h2 className="text-lg font-semibold text-[#202227]">Open terminals</h2>
+                <p className="mt-1.5 text-sm leading-6 text-[#5f626b]">
+                  Live PTY sessions currently held by the server.
+                </p>
+              </div>
+              <button
+                type="button"
+                className="inline-flex size-9 shrink-0 items-center justify-center rounded-md border border-[#d9d9dc] bg-[#fafafa] text-[#5f626b] transition-colors hover:border-[#b8bbc3] hover:text-[#202227] focus:outline-none focus-visible:ring-2 focus-visible:ring-[#4078f2]"
+                aria-label="Refresh terminals"
+                onClick={() => void refreshSessions(true)}
+              >
+                <RefreshCw className="size-4" aria-hidden="true" />
+              </button>
+            </div>
+
+            <div className="mt-4 min-h-[132px]">
+              {isLoadingSessions && sessions.length === 0 ? (
+                <div className="flex h-[132px] items-center justify-center gap-2 text-sm text-[#696c77]">
+                  <Loader2 className="size-4 animate-spin" aria-hidden="true" />
+                  Loading terminals
                 </div>
-                <h2 className="text-lg font-semibold text-[#202227]">{title}</h2>
-                <p className="mt-2 text-sm leading-6 text-[#5f626b]">{description}</p>
-              </div>
-              <div className="mt-5 flex items-center gap-2 text-sm font-medium text-[#2f5fbe]">
-                {label}
-                <ArrowRight className="size-4 transition-transform group-hover:translate-x-0.5" aria-hidden="true" />
-              </div>
-            </Link>
-          ))}
+              ) : sessionError ? (
+                <div className="flex h-[132px] items-center justify-center rounded-md border border-rose-200 bg-rose-50 px-4 text-sm text-rose-700">
+                  {sessionError}
+                </div>
+              ) : sessions.length === 0 ? (
+                <div className="flex h-[132px] flex-col items-center justify-center rounded-md border border-dashed border-[#d9d9dc] bg-[#fafafa] px-4 text-center">
+                  <MonitorUp className="mb-3 size-5 text-[#696c77]" aria-hidden="true" />
+                  <p className="text-sm font-medium text-[#383a42]">No open terminals</p>
+                  <p className="mt-1 text-xs text-[#696c77]">Create one from the panel on the left.</p>
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  {sessions.map((session) => {
+                    const isEnding = endingSessionIds.has(session.sessionId);
+                    return (
+                      <div
+                        key={session.sessionId}
+                        className="grid gap-3 rounded-md border border-[#e4e4e7] bg-[#fafafa] p-3 sm:grid-cols-[minmax(0,1fr)_auto]"
+                      >
+                        <Link
+                          to={`/terminal/${session.sessionId}`}
+                          className="min-w-0 rounded-sm focus:outline-none focus-visible:ring-2 focus-visible:ring-[#4078f2]"
+                        >
+                          <div className="flex min-w-0 items-center gap-2">
+                            <TerminalSquare className="size-4 shrink-0 text-[#4078f2]" aria-hidden="true" />
+                            <span className="truncate text-sm font-semibold text-[#202227]">
+                              {session.sessionId}
+                            </span>
+                          </div>
+                          <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-xs text-[#696c77]">
+                            <span>pid {session.pid}</span>
+                            <span>{session.clients} client{session.clients === 1 ? '' : 's'}</span>
+                            <span>{session.mode}</span>
+                          </div>
+                          <p className="mt-1 truncate text-xs text-[#696c77]">{session.cwd}</p>
+                        </Link>
+                        <div className="flex items-center justify-end gap-2">
+                          <Link
+                            to={`/terminal/${session.sessionId}`}
+                            className="inline-flex h-8 items-center justify-center rounded-md border border-[#d9d9dc] bg-white px-3 text-xs font-medium text-[#2f5fbe] transition-colors hover:border-[#b8bbc3] focus:outline-none focus-visible:ring-2 focus-visible:ring-[#4078f2]"
+                          >
+                            Open
+                          </Link>
+                          <button
+                            type="button"
+                            className="inline-flex h-8 items-center justify-center gap-1.5 rounded-md border border-rose-200 bg-white px-3 text-xs font-medium text-rose-700 transition-colors hover:border-rose-300 hover:bg-rose-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-rose-400 disabled:cursor-not-allowed disabled:opacity-60"
+                            disabled={isEnding}
+                            onClick={() => void endSession(session.sessionId)}
+                          >
+                            {isEnding ? (
+                              <Loader2 className="size-3.5 animate-spin" aria-hidden="true" />
+                            ) : (
+                              <Power className="size-3.5" aria-hidden="true" />
+                            )}
+                            End
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          </section>
         </section>
 
         <section className="rounded-lg border border-[#d9d9dc] bg-white p-5 shadow-sm">
@@ -103,21 +258,47 @@ export default function HomeRoute() {
             <div>
               <h2 className="text-lg font-semibold text-[#202227]">Diff2HTML workbench</h2>
               <p className="mt-1.5 text-sm leading-6 text-[#5f626b]">
-                Local diff review, file inspection, editing, staging, and commit flow.
+                Independent diff workspace for review, file editing, import, staging, and commit.
               </p>
             </div>
-            <span className="w-fit rounded-md border border-amber-300 bg-amber-50 px-2.5 py-1 text-xs font-medium text-amber-700">
-              Next module
-            </span>
+            <a
+              href="/diff/"
+              className="inline-flex h-9 w-fit items-center justify-center gap-2 rounded-md bg-[#4078f2] px-3 text-sm font-medium text-white transition-colors hover:bg-[#2f5fbe] focus:outline-none focus-visible:ring-2 focus-visible:ring-[#4078f2] focus-visible:ring-offset-2"
+            >
+              Open workbench
+              <ArrowRight className="size-4" aria-hidden="true" />
+            </a>
           </div>
 
           <div className="mt-5 grid gap-3 md:grid-cols-3">
-            {diffItems.map(({ title, description, Icon }) => (
-              <div key={title} className="rounded-lg border border-[#e4e4e7] bg-[#fafafa] p-4">
+            {diffRoutes.map(({ title, description, href, label, Icon }) => (
+              <a
+                key={title}
+                href={href}
+                className="group rounded-md border border-[#e4e4e7] bg-[#fafafa] p-4 transition-colors hover:border-[#b8bbc3] hover:bg-white focus:outline-none focus-visible:ring-2 focus-visible:ring-[#4078f2]"
+              >
                 <Icon className="mb-4 size-5 text-[#4078f2]" aria-hidden="true" />
                 <h3 className="text-sm font-semibold text-[#202227]">{title}</h3>
                 <p className="mt-2 text-sm leading-6 text-[#5f626b]">{description}</p>
-              </div>
+                <span className="mt-4 inline-flex items-center gap-1.5 text-xs font-medium text-[#2f5fbe]">
+                  {label}
+                  <ArrowRight
+                    className="size-3.5 transition-transform group-hover:translate-x-0.5"
+                    aria-hidden="true"
+                  />
+                </span>
+              </a>
+            ))}
+          </div>
+          <div className="mt-4 flex flex-wrap gap-2">
+            {diffQuickLinks.map((item) => (
+              <a
+                key={item.href}
+                href={item.href}
+                className="rounded-md border border-[#d9d9dc] bg-white px-2.5 py-1 text-xs font-medium text-[#5f626b] transition-colors hover:border-[#b8bbc3] hover:text-[#202227] focus:outline-none focus-visible:ring-2 focus-visible:ring-[#4078f2]"
+              >
+                {item.label}
+              </a>
             ))}
           </div>
         </section>
