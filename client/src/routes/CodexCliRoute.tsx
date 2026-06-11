@@ -5,7 +5,6 @@ import { FitAddon } from '@xterm/addon-fit';
 import { apiBaseUrl, request } from 'librechat-data-provider';
 import copyToClipboard from 'copy-to-clipboard';
 import { useAuthContext } from '~/hooks';
-import { createTerminalSessionId, createTerminalSessionPath } from '~/utils';
 import '@fontsource/jetbrains-mono/400.css';
 import '@fontsource/jetbrains-mono/700.css';
 import '@xterm/xterm/css/xterm.css';
@@ -20,6 +19,15 @@ type TerminalMode = 'shell' | 'codex';
 type TerminalExitInfo = {
   exitCode?: number;
   signal?: number;
+};
+
+type TerminalSessionResponse = {
+  sessionId: string;
+  mode: TerminalMode;
+  pid: number;
+  cwd: string;
+  serverPid?: number;
+  serverInstanceId?: string;
 };
 
 const atomOneLightTheme = {
@@ -157,6 +165,7 @@ export default function CodexCliRoute() {
   const socketRef = useRef<WebSocket | null>(null);
   const reconnectCounter = useRef(0);
   const lastSessionIdRef = useRef<string | null>(null);
+  const pendingSessionCreateRef = useRef<TerminalMode | null>(null);
   const suppressTerminalResponsesUntilRef = useRef(0);
   const hasExitedRef = useRef(false);
   const [exitInfo, setExitInfo] = useState<TerminalExitInfo | null>(null);
@@ -173,10 +182,51 @@ export default function CodexCliRoute() {
 
   useEffect(() => {
     if (activeSessionId) {
+      pendingSessionCreateRef.current = null;
       return;
     }
-    navigate(`/${routePrefix}/${createTerminalSessionId()}`, { replace: true });
-  }, [activeSessionId, navigate, routePrefix]);
+    if (!isAuthenticated || !token || pendingSessionCreateRef.current === terminalMode) {
+      return;
+    }
+
+    let cancelled = false;
+    pendingSessionCreateRef.current = terminalMode;
+    reconnectCounter.current += 1;
+    socketRef.current?.close();
+    socketRef.current = null;
+    hasExitedRef.current = false;
+    setExitInfo(null);
+
+    const createSession = async () => {
+      try {
+        const session = await request.post<TerminalSessionResponse>(
+          `${apiBaseUrl()}/api/codex-cli/sessions`,
+          { mode: terminalMode },
+        );
+        if (cancelled) {
+          return;
+        }
+        navigate(`/${routePrefix}/${session.sessionId}`, { replace: true });
+      } catch {
+        if (!cancelled) {
+          pendingSessionCreateRef.current = null;
+          terminalRef.current?.writeln('\r\n[web terminal] failed to create terminal session\r\n');
+        }
+      }
+    };
+
+    void createSession();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [activeSessionId, isAuthenticated, navigate, routePrefix, terminalMode, token]);
+
+  useEffect(() => {
+    if (!activeSessionId) {
+      lastSessionIdRef.current = null;
+    }
+  }, [activeSessionId]);
 
   useEffect(() => {
     const terminalKey = activeSessionId ? `${terminalMode}:${activeSessionId}` : null;
@@ -230,7 +280,10 @@ export default function CodexCliRoute() {
 
     let ticketResponse: TicketResponse;
     try {
-      ticketResponse = await request.post(`${apiBaseUrl()}/api/codex-cli/ticket`, {});
+      ticketResponse = await request.post(`${apiBaseUrl()}/api/codex-cli/ticket`, {
+        sessionId: activeSessionId,
+        mode: terminalMode,
+      });
     } catch {
       terminalRef.current?.writeln('\r\n[web terminal] failed to open terminal session\r\n');
       return;
@@ -337,8 +390,8 @@ export default function CodexCliRoute() {
   }, [activeSessionId, fitAndNotify, isAuthenticated, terminalMode, token]);
 
   const openFreshTerminal = useCallback(() => {
-    navigate(createTerminalSessionPath(terminalMode));
-  }, [navigate, terminalMode]);
+    navigate(`/${routePrefix}/new`);
+  }, [navigate, routePrefix]);
 
   useEffect(() => {
     const container = containerRef.current;

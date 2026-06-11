@@ -18,7 +18,22 @@ window.addEventListener('vite:preloadError', (event) => {
 const container = document.getElementById('root');
 const root = createRoot(container);
 
+function unregisterServiceWorkers() {
+  if (!('serviceWorker' in navigator)) {
+    return;
+  }
+  window.addEventListener('load', () => {
+    navigator.serviceWorker
+      .getRegistrations()
+      .then((registrations) => Promise.all(registrations.map((item) => item.unregister())))
+      .catch((error) => {
+        console.warn('[service-worker] Failed to unregister', error);
+      });
+  });
+}
+
 async function bootstrap() {
+  unregisterServiceWorkers();
   await initializeI18n();
 
   root.render(

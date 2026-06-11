@@ -66,6 +66,9 @@ function normalizeSessionId(value) {
     return null;
   }
   const trimmed = value.trim();
+  if (trimmed === 'new') {
+    return null;
+  }
   if (!/^[A-Za-z0-9._:-]{1,128}$/.test(trimmed)) {
     return null;
   }
@@ -104,20 +107,35 @@ function wasSessionTerminated(sessionKey) {
   return terminatedSessions.has(sessionKey);
 }
 
-function createCodexCliTicket(user) {
+function createCodexCliTicket(user, options = {}) {
   cleanupTickets();
   const userId = normalizeUserId(user);
   if (!userId) {
     throw new Error('Cannot create Codex CLI ticket without an authenticated user.');
   }
+  const sessionId = options.sessionId ? normalizeSessionId(options.sessionId) : null;
+  if (options.sessionId && !sessionId) {
+    throw new Error('Invalid terminal session id.');
+  }
+  const mode = normalizeMode(options.mode);
 
   const ticket = crypto.randomBytes(32).toString('base64url');
   const expiresAt = now() + TICKET_TTL_MS;
   tickets.set(ticket, {
     userId,
     tenantId: user?.tenantId,
+    sessionId,
+    mode,
     expiresAt,
   });
+  const ticketLog = {
+    userId,
+    sessionId,
+    mode,
+    serverPid: process.pid,
+    serverInstanceId,
+  };
+  logger.info(`[CodexCliTerminal] Ticket created ${formatLogFields(ticketLog)}`, ticketLog);
   return {
     ticket,
     expiresAt: new Date(expiresAt).toISOString(),
@@ -159,6 +177,26 @@ function clampTerminalSize(value, fallback, min, max) {
     return fallback;
   }
   return Math.max(min, Math.min(max, parsed));
+}
+
+function formatLogFields(fields) {
+  return Object.entries(fields)
+    .filter(([, value]) => value !== undefined && value !== null)
+    .map(([key, value]) => `${key}=${value}`)
+    .join(' ');
+}
+
+function serializeSession(session) {
+  return {
+    sessionId: session.sessionId,
+    mode: session.mode,
+    pid: session.ptyProcess.pid,
+    cwd: session.repoPath,
+    exited: session.exited,
+    clients: session.clients.size,
+    serverPid: process.pid,
+    serverInstanceId,
+  };
 }
 
 class CodexCliSession {
@@ -206,13 +244,18 @@ class CodexCliSession {
       });
     });
 
-    logger.info('[CodexCliTerminal] PTY started', {
+    const startInfo = {
       sessionId: this.sessionId,
+      sessionKey: getSessionKey(this.userId, this.sessionId),
+      userId: this.userId,
       mode: this.mode,
       pid: this.ptyProcess.pid,
       cwd: this.repoPath,
       shell: shellBin,
-    });
+      serverPid: process.pid,
+      serverInstanceId,
+    };
+    logger.info(`[CodexCliTerminal] PTY started ${formatLogFields(startInfo)}`, startInfo);
 
     if (this.mode === 'codex') {
       const command = [
@@ -289,12 +332,17 @@ class CodexCliSession {
         // Ignore close races.
       }
     }
-    logger.info('[CodexCliTerminal] PTY exited', {
+    const exitLog = {
       sessionId: this.sessionId,
+      sessionKey: getSessionKey(this.userId, this.sessionId),
+      userId: this.userId,
       mode: this.mode,
       pid: this.ptyProcess.pid,
+      serverPid: process.pid,
+      serverInstanceId,
       ...exitInfo,
-    });
+    };
+    logger.info(`[CodexCliTerminal] PTY exited ${formatLogFields(exitLog)}`, exitLog);
     return true;
   }
 
@@ -365,7 +413,40 @@ class CodexCliSession {
   }
 }
 
-function getOrCreateSession({ sessionId, userId, mode, cols, rows }) {
+function createCodexCliSession(user, options = {}) {
+  const userId = normalizeUserId(user);
+  if (!userId) {
+    throw new Error('Cannot create terminal session without an authenticated user.');
+  }
+  const mode = normalizeMode(options.mode);
+  const cols = clampTerminalSize(options.cols, 120, 20, 300);
+  const rows = clampTerminalSize(options.rows, 36, 8, 120);
+
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    const sessionId = crypto.randomUUID();
+    const sessionKey = getSessionKey(userId, sessionId);
+    if (sessions.has(sessionKey) || wasSessionTerminated(sessionKey)) {
+      continue;
+    }
+    const session = new CodexCliSession({ sessionId, userId, mode, cols, rows });
+    sessions.set(sessionKey, session);
+    const createLog = {
+      sessionId,
+      sessionKey,
+      userId,
+      mode,
+      pid: session.ptyProcess.pid,
+      serverPid: process.pid,
+      serverInstanceId,
+    };
+    logger.info(`[CodexCliTerminal] Session created ${formatLogFields(createLog)}`, createLog);
+    return serializeSession(session);
+  }
+
+  throw new Error('Unable to allocate terminal session id.');
+}
+
+function getSessionForAttach({ sessionId, userId, mode }) {
   const sessionKey = getSessionKey(userId, sessionId);
   if (wasSessionTerminated(sessionKey)) {
     const endedSession = sessions.get(sessionKey);
@@ -375,29 +456,28 @@ function getOrCreateSession({ sessionId, userId, mode, cols, rows }) {
     throw new Error('Terminal session was ended.');
   }
   const existing = sessions.get(sessionKey);
-  if (existing) {
-    if (existing.exited || existing.processExited) {
-      sessions.delete(sessionKey);
-    } else {
-      if (existing.mode !== mode) {
-        throw new Error('Codex CLI session mode mismatch.');
-      }
-      logger.info('[CodexCliTerminal] PTY session reused', {
-        sessionId,
-        sessionKey,
-        userId,
-        mode,
-        pid: existing.ptyProcess.pid,
-        clients: existing.clients.size,
-        serverPid: process.pid,
-        serverInstanceId,
-      });
-      return existing;
-    }
+  if (!existing) {
+    throw new Error('Terminal session does not exist.');
   }
-  const session = new CodexCliSession({ sessionId, userId, mode, cols, rows });
-  sessions.set(sessionKey, session);
-  return session;
+  if (existing.exited || existing.processExited) {
+    sessions.delete(sessionKey);
+    throw new Error('Terminal session has exited.');
+  }
+  if (existing.mode !== mode) {
+    throw new Error('Codex CLI session mode mismatch.');
+  }
+  const attachLog = {
+    sessionId,
+    sessionKey,
+    userId,
+    mode,
+    pid: existing.ptyProcess.pid,
+    clients: existing.clients.size,
+    serverPid: process.pid,
+    serverInstanceId,
+  };
+  logger.info(`[CodexCliTerminal] PTY session attach ${formatLogFields(attachLog)}`, attachLog);
+  return existing;
 }
 
 function getCodexCliSessions(user) {
@@ -405,18 +485,18 @@ function getCodexCliSessions(user) {
   if (!userId) {
     return [];
   }
-  return [...sessions.values()]
+  const visibleSessions = [...sessions.values()]
     .filter((session) => session.userId === userId)
-    .map((session) => ({
-      sessionId: session.sessionId,
-      mode: session.mode,
-      pid: session.ptyProcess.pid,
-      cwd: session.repoPath,
-      exited: session.exited,
-      clients: session.clients.size,
-      serverPid: process.pid,
-      serverInstanceId,
-    }));
+    .map(serializeSession);
+  const listLog = {
+    userId,
+    count: visibleSessions.length,
+    sessionIds: visibleSessions.map((session) => `${session.mode}:${session.sessionId}`).join(','),
+    serverPid: process.pid,
+    serverInstanceId,
+  };
+  logger.info(`[CodexCliTerminal] Sessions listed ${formatLogFields(listLog)}`, listLog);
+  return visibleSessions;
 }
 
 function terminateCodexCliSession(sessionId, user) {
@@ -432,13 +512,17 @@ function terminateCodexCliSession(sessionId, user) {
   markSessionTerminated(sessionKey);
   const session = sessions.get(sessionKey);
   if (!session) {
-    logger.info('[CodexCliTerminal] Terminal session already absent during terminate', {
+    const absentLog = {
       sessionId: normalized,
       sessionKey,
       userId,
       serverPid: process.pid,
       serverInstanceId,
-    });
+    };
+    logger.info(
+      `[CodexCliTerminal] Terminal session already absent during terminate ${formatLogFields(absentLog)}`,
+      absentLog,
+    );
     return {
       ok: true,
       sessionId: normalized,
@@ -449,7 +533,7 @@ function terminateCodexCliSession(sessionId, user) {
   }
   const pid = session.ptyProcess?.pid;
   session.terminate();
-  logger.info('[CodexCliTerminal] Terminal session terminate requested', {
+  const terminateLog = {
     sessionId: normalized,
     sessionKey,
     userId,
@@ -457,7 +541,11 @@ function terminateCodexCliSession(sessionId, user) {
     pid,
     serverPid: process.pid,
     serverInstanceId,
-  });
+  };
+  logger.info(
+    `[CodexCliTerminal] Terminal session terminate requested ${formatLogFields(terminateLog)}`,
+    terminateLog,
+  );
   return { ok: true, sessionId: normalized, pid, serverPid: process.pid, serverInstanceId };
 }
 
@@ -479,13 +567,22 @@ function handleWsConnection(ws, params) {
   const { userId, sessionId, mode, cols, rows } = params;
   let session;
   try {
-    session = getOrCreateSession({ sessionId, userId, mode, cols, rows });
+    session = getSessionForAttach({ sessionId, userId, mode, cols, rows });
     session.attach(ws);
   } catch (error) {
-    logger.warn('[CodexCliTerminal] WebSocket attach failed', {
+    const attachError = {
       sessionId,
+      sessionKey: getSessionKey(userId, sessionId),
+      userId,
+      mode,
+      serverPid: process.pid,
+      serverInstanceId,
       error: error?.message ?? error,
-    });
+    };
+    logger.warn(
+      `[CodexCliTerminal] WebSocket attach failed ${formatLogFields(attachError)}`,
+      attachError,
+    );
     ws.close(1011, 'Failed to start Codex CLI');
     return;
   }
@@ -562,6 +659,24 @@ function attachCodexCliTerminal(server) {
     const rows = clampTerminalSize(url.searchParams.get('rows'), 36, 8, 120);
     const mode = normalizeMode(url.searchParams.get('mode'));
 
+    if ((ticket.sessionId && ticket.sessionId !== sessionId) || (ticket.mode && ticket.mode !== mode)) {
+      const mismatchLog = {
+        ticketSessionId: ticket.sessionId,
+        querySessionId: sessionId,
+        ticketMode: ticket.mode,
+        queryMode: mode,
+        userId: ticket.userId,
+        serverPid: process.pid,
+        serverInstanceId,
+      };
+      logger.warn(
+        `[CodexCliTerminal] WebSocket ticket mismatch ${formatLogFields(mismatchLog)}`,
+        mismatchLog,
+      );
+      closeSocket(socket, 403, 'Forbidden');
+      return;
+    }
+
     websocketServer.handleUpgrade(request, socket, head, (ws) => {
       websocketServer.emit('connection', ws, request, {
         userId: ticket.userId,
@@ -593,6 +708,7 @@ function attachCodexCliTerminal(server) {
 
 module.exports = {
   attachCodexCliTerminal,
+  createCodexCliSession,
   createCodexCliTicket,
   getCodexCliSessions,
   shutdownCodexCliTerminal,

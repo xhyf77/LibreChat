@@ -1,6 +1,7 @@
 const express = require('express');
 const requireJwtAuth = require('~/server/middleware/requireJwtAuth');
 const {
+  createCodexCliSession,
   createCodexCliTicket,
   getCodexCliSessions,
   terminateCodexCliSession,
@@ -10,7 +11,25 @@ const router = express.Router();
 router.use(requireJwtAuth);
 
 router.post('/ticket', (req, res) => {
-  res.json(createCodexCliTicket(req.user));
+  try {
+    res.json(createCodexCliTicket(req.user, req.body));
+  } catch (error) {
+    res.status(400).json({
+      ok: false,
+      reason: error?.message || 'Unable to create terminal ticket',
+    });
+  }
+});
+
+router.post('/sessions', (req, res) => {
+  try {
+    res.json(createCodexCliSession(req.user, req.body));
+  } catch (error) {
+    res.status(400).json({
+      ok: false,
+      reason: error?.message || 'Unable to create terminal session',
+    });
+  }
 });
 
 router.get('/sessions', (req, res) => {
