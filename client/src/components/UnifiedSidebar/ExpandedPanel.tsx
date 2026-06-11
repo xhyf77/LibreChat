@@ -6,7 +6,7 @@ import type { NavLink } from '~/common';
 import { CLOSE_SIDEBAR_ID } from '~/components/Chat/Menus/OpenSidebar';
 import { useActivePanel, resolveActivePanel, DEFAULT_PANEL } from '~/Providers';
 import { useLocalize } from '~/hooks';
-import { cn } from '~/utils';
+import { cn, createTerminalSessionPath } from '~/utils';
 
 const AccountSettings = lazy(() => import('~/components/Nav/AccountSettings'));
 
@@ -20,10 +20,17 @@ const NewChatButton = memo(function NewChatButton({
 
   const handleClick = useCallback(
     (e: React.MouseEvent<HTMLAnchorElement>) => {
+      const nextPath = createTerminalSessionPath('shell');
       if (e.button === 0 && !e.ctrlKey && !e.metaKey) {
         e.preventDefault();
         setActive(DEFAULT_PANEL);
-        navigate('/terminal/new');
+        navigate(nextPath);
+        return;
+      }
+      e.currentTarget.href = nextPath;
+      if (e.button === 0 && (e.ctrlKey || e.metaKey)) {
+        window.open(nextPath, '_blank');
+        e.preventDefault();
       }
     },
     [navigate, setActive],

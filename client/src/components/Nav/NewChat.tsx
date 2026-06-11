@@ -1,18 +1,19 @@
 import { TooltipAnchor, Button, NewChatIcon } from '@librechat/client';
 import { useNavigate } from 'react-router-dom';
 import { useLocalize } from '~/hooks';
-import { cn } from '~/utils';
+import { cn, createTerminalSessionPath } from '~/utils';
 
 export default function NewChat({ className }: { className?: string }) {
   const localize = useLocalize();
   const navigate = useNavigate();
 
   const clickHandler: React.MouseEventHandler<HTMLButtonElement> = (e) => {
+    const nextPath = createTerminalSessionPath('shell');
     if (e.button === 0 && (e.ctrlKey || e.metaKey)) {
-      window.open('/terminal/new', '_blank');
+      window.open(nextPath, '_blank');
       return;
     }
-    navigate('/terminal/new');
+    navigate(nextPath);
   };
 
   return (

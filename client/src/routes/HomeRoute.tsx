@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import {
   ArrowRight,
   FileDiff,
@@ -14,6 +14,7 @@ import {
 } from 'lucide-react';
 import { apiBaseUrl, request } from 'librechat-data-provider';
 import { useAuthContext } from '~/hooks';
+import { createTerminalSessionPath } from '~/utils';
 
 const repoPath = '~/fjj/hm_os/hm-verif-kernel';
 const terminalPollIntervalMs = 4000;
@@ -33,6 +34,7 @@ type TerminalSessionsResponse = {
 
 type TerminalActionResponse = {
   ok: boolean;
+  reason?: string;
 };
 
 const diffRoutes = [
@@ -71,6 +73,7 @@ function terminalSessionHref(session: TerminalSession) {
 
 export default function HomeRoute() {
   const { user } = useAuthContext();
+  const navigate = useNavigate();
   const [sessions, setSessions] = useState<TerminalSession[]>([]);
   const [isLoadingSessions, setIsLoadingSessions] = useState(true);
   const [sessionError, setSessionError] = useState<string | null>(null);
@@ -106,9 +109,14 @@ export default function HomeRoute() {
     async (sessionId: string) => {
       setEndingSessionIds((current) => new Set(current).add(sessionId));
       try {
-        await request.delete<TerminalActionResponse>(
+        const result = await request.delete<TerminalActionResponse>(
           `${apiBaseUrl()}/api/codex-cli/sessions/${encodeURIComponent(sessionId)}`,
         );
+        if (!result.ok) {
+          setSessionError(result.reason || 'Unable to end terminal');
+          await refreshSessions();
+          return;
+        }
         setSessions((current) => current.filter((session) => session.sessionId !== sessionId));
         window.setTimeout(() => {
           void refreshSessions();
@@ -122,6 +130,21 @@ export default function HomeRoute() {
       }
     },
     [refreshSessions],
+  );
+
+  const openNewTerminal = useCallback(
+    (event: React.MouseEvent<HTMLButtonElement>) => {
+      if (event.button !== 0) {
+        return;
+      }
+      const nextPath = createTerminalSessionPath('shell');
+      if (event.ctrlKey || event.metaKey) {
+        window.open(nextPath, '_blank');
+        return;
+      }
+      navigate(nextPath);
+    },
+    [navigate],
   );
 
   return (
@@ -148,9 +171,10 @@ export default function HomeRoute() {
         </section>
 
         <section className="grid gap-4 lg:grid-cols-[minmax(0,0.9fr)_minmax(380px,1.1fr)]">
-          <Link
-            to="/terminal/new"
-            className="group flex min-h-[232px] flex-col justify-between rounded-lg border border-[#d9d9dc] bg-white p-5 shadow-sm transition-colors hover:border-[#b8bbc3] hover:bg-[#fbfbfb] focus:outline-none focus-visible:ring-2 focus-visible:ring-[#4078f2]"
+          <button
+            type="button"
+            className="group flex min-h-[232px] flex-col justify-between rounded-lg border border-[#d9d9dc] bg-white p-5 text-left shadow-sm transition-colors hover:border-[#b8bbc3] hover:bg-[#fbfbfb] focus:outline-none focus-visible:ring-2 focus-visible:ring-[#4078f2]"
+            onClick={openNewTerminal}
           >
             <div>
               <div className="mb-5 flex size-10 items-center justify-center rounded-md bg-blue-500/10 text-blue-600">
@@ -165,7 +189,7 @@ export default function HomeRoute() {
               Open terminal
               <ArrowRight className="size-4 transition-transform group-hover:translate-x-0.5" aria-hidden="true" />
             </div>
-          </Link>
+          </button>
 
           <section className="rounded-lg border border-[#d9d9dc] bg-white p-5 shadow-sm">
             <div className="flex items-start justify-between gap-3 border-b border-[#e4e4e7] pb-4">

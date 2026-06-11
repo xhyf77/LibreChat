@@ -36,6 +36,7 @@ export * from './previewCache';
 export * from './groupToolCalls';
 export * from './toolLabels';
 export * from './favoritesError';
+export * from './terminalSession';
 export { default as cn } from './cn';
 export { default as logger } from './logger';
 export { default as getLoginError } from './getLoginError';

@@ -5,6 +5,7 @@ import { FitAddon } from '@xterm/addon-fit';
 import { apiBaseUrl, request } from 'librechat-data-provider';
 import copyToClipboard from 'copy-to-clipboard';
 import { useAuthContext } from '~/hooks';
+import { createTerminalSessionId } from '~/utils';
 import '@fontsource/jetbrains-mono/400.css';
 import '@fontsource/jetbrains-mono/700.css';
 import '@xterm/xterm/css/xterm.css';
@@ -61,13 +62,6 @@ function loadTerminalFonts(fontSize: number) {
     document.fonts.load(`700 ${fontSize}px "JetBrainsMono Nerd Font Mono"`),
     document.fonts.load(`400 ${fontSize}px "Symbols Nerd Font Mono"`),
   ]).then(() => undefined);
-}
-
-function createSessionId() {
-  if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) {
-    return crypto.randomUUID();
-  }
-  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
 }
 
 function buildWebSocketUrl({
@@ -181,7 +175,7 @@ export default function CodexCliRoute() {
     if (activeSessionId) {
       return;
     }
-    navigate(`/${routePrefix}/${createSessionId()}`, { replace: true });
+    navigate(`/${routePrefix}/${createTerminalSessionId()}`, { replace: true });
   }, [activeSessionId, navigate, routePrefix]);
 
   useEffect(() => {
@@ -417,7 +411,7 @@ export default function CodexCliRoute() {
                 Home
               </Link>
               <Link
-                to={`/${routePrefix}/new`}
+                to={createTerminalSessionPath(terminalMode)}
                 className="inline-flex h-9 items-center justify-center rounded-md bg-[#4078f2] px-3 text-sm font-medium text-white transition-colors hover:bg-[#2f5fbe] focus:outline-none focus-visible:ring-2 focus-visible:ring-[#4078f2] focus-visible:ring-offset-2"
               >
                 New terminal

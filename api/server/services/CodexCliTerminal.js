@@ -7,11 +7,13 @@ const { logger } = require('@librechat/data-schemas');
 const DEFAULT_REPO_PATH = '/home/xieminhui/fjj/hm_os/hm-verif-kernel';
 const DEFAULT_CODEX_HOME = '/home/xieminhui/fjj/.codex';
 const TICKET_TTL_MS = 30_000;
+const TERMINATED_SESSION_TTL_MS = 60_000;
 const MAX_REPLAY_BYTES = 2 * 1024 * 1024;
 const HEARTBEAT_INTERVAL_MS = 30_000;
 
 const tickets = new Map();
 const sessions = new Map();
+const terminatedSessions = new Map();
 let websocketServer = null;
 let heartbeatTimer = null;
 
@@ -76,6 +78,25 @@ function cleanupTickets() {
       tickets.delete(ticket);
     }
   }
+}
+
+function cleanupTerminatedSessions() {
+  const ts = now();
+  for (const [sessionId, expiresAt] of terminatedSessions.entries()) {
+    if (expiresAt <= ts) {
+      terminatedSessions.delete(sessionId);
+    }
+  }
+}
+
+function markSessionTerminated(sessionId) {
+  cleanupTerminatedSessions();
+  terminatedSessions.set(sessionId, now() + TERMINATED_SESSION_TTL_MS);
+}
+
+function wasSessionTerminated(sessionId) {
+  cleanupTerminatedSessions();
+  return terminatedSessions.has(sessionId);
 }
 
 function createCodexCliTicket(user) {
@@ -301,9 +322,11 @@ class CodexCliSession {
     }
     this.finishExit({ signal: 15 });
     try {
+      this.killProcessGroup('SIGTERM');
       this.ptyProcess.kill('SIGTERM');
       setTimeout(() => {
         if (!this.processExited) {
+          this.killProcessGroup('SIGKILL');
           this.ptyProcess.kill('SIGKILL');
         }
       }, 1500).unref?.();
@@ -312,6 +335,25 @@ class CodexCliSession {
         sessionId: this.sessionId,
         error: error?.message ?? error,
       });
+    }
+  }
+
+  killProcessGroup(signal) {
+    const pid = Number(this.ptyProcess?.pid);
+    if (!Number.isFinite(pid) || pid <= 0) {
+      return;
+    }
+    try {
+      process.kill(-pid, signal);
+    } catch (error) {
+      if (error?.code !== 'ESRCH') {
+        logger.warn('[CodexCliTerminal] PTY process group kill failed', {
+          sessionId: this.sessionId,
+          pid,
+          signal,
+          error: error?.message ?? error,
+        });
+      }
     }
   }
 }
@@ -326,6 +368,9 @@ function getOrCreateSession({ sessionId, userId, mode, cols, rows }) {
       throw new Error('Codex CLI session mode mismatch.');
     }
     return existing;
+  }
+  if (wasSessionTerminated(sessionId)) {
+    throw new Error('Terminal session was ended.');
   }
   const session = new CodexCliSession({ sessionId, userId, mode, cols, rows });
   sessions.set(sessionId, session);
@@ -462,14 +507,24 @@ function getCodexCliSessions() {
 function terminateCodexCliSession(sessionId) {
   const normalized = normalizeSessionId(sessionId);
   if (!normalized) {
-    return false;
+    return { ok: false, reason: 'invalid_session_id' };
   }
+  markSessionTerminated(normalized);
   const session = sessions.get(normalized);
   if (!session) {
-    return false;
+    logger.info('[CodexCliTerminal] Terminal session already absent during terminate', {
+      sessionId: normalized,
+    });
+    return { ok: true, sessionId: normalized, alreadyEnded: true };
   }
+  const pid = session.ptyProcess?.pid;
   session.terminate();
-  return true;
+  logger.info('[CodexCliTerminal] Terminal session terminate requested', {
+    sessionId: normalized,
+    mode: session.mode,
+    pid,
+  });
+  return { ok: true, sessionId: normalized, pid };
 }
 
 function shutdownCodexCliTerminal() {

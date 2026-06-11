@@ -18,7 +18,7 @@ router.get('/sessions', (_req, res) => {
 });
 
 router.delete('/sessions/:sessionId', (req, res) => {
-  res.json({ ok: terminateCodexCliSession(req.params.sessionId) });
+  res.json(terminateCodexCliSession(req.params.sessionId));
 });
 
 module.exports = router;
