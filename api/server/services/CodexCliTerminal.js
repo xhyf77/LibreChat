@@ -14,6 +14,7 @@ const HEARTBEAT_INTERVAL_MS = 30_000;
 const tickets = new Map();
 const sessions = new Map();
 const terminatedSessions = new Map();
+const serverInstanceId = crypto.randomBytes(6).toString('hex');
 let websocketServer = null;
 let heartbeatTimer = null;
 
@@ -71,6 +72,10 @@ function normalizeSessionId(value) {
   return trimmed;
 }
 
+function getSessionKey(userId, sessionId) {
+  return `${userId}:${sessionId}`;
+}
+
 function cleanupTickets() {
   const ts = now();
   for (const [ticket, record] of tickets.entries()) {
@@ -89,14 +94,14 @@ function cleanupTerminatedSessions() {
   }
 }
 
-function markSessionTerminated(sessionId) {
+function markSessionTerminated(sessionKey) {
   cleanupTerminatedSessions();
-  terminatedSessions.set(sessionId, now() + TERMINATED_SESSION_TTL_MS);
+  terminatedSessions.set(sessionKey, now() + TERMINATED_SESSION_TTL_MS);
 }
 
-function wasSessionTerminated(sessionId) {
+function wasSessionTerminated(sessionKey) {
   cleanupTerminatedSessions();
-  return terminatedSessions.has(sessionId);
+  return terminatedSessions.has(sessionKey);
 }
 
 function createCodexCliTicket(user) {
@@ -248,6 +253,8 @@ class CodexCliSession {
       mode: this.mode,
       pid: this.ptyProcess.pid,
       cwd: this.repoPath,
+      serverPid: process.pid,
+      serverInstanceId,
     });
     if (this.buffer) {
       wsSend(ws, { type: 'replay', data: this.buffer });
@@ -273,7 +280,7 @@ class CodexCliSession {
     }
     this.exited = true;
     this.exitInfo = exitInfo;
-    sessions.delete(this.sessionId);
+    sessions.delete(getSessionKey(this.userId, this.sessionId));
     this.broadcast({ type: 'exit', ...exitInfo });
     for (const client of this.clients) {
       try {
@@ -359,22 +366,113 @@ class CodexCliSession {
 }
 
 function getOrCreateSession({ sessionId, userId, mode, cols, rows }) {
-  const existing = sessions.get(sessionId);
-  if (existing) {
-    if (existing.userId !== userId) {
-      throw new Error('Codex CLI session belongs to another user.');
+  const sessionKey = getSessionKey(userId, sessionId);
+  if (wasSessionTerminated(sessionKey)) {
+    const endedSession = sessions.get(sessionKey);
+    if (endedSession && !endedSession.exited) {
+      endedSession.terminate();
     }
-    if (existing.mode !== mode) {
-      throw new Error('Codex CLI session mode mismatch.');
-    }
-    return existing;
-  }
-  if (wasSessionTerminated(sessionId)) {
     throw new Error('Terminal session was ended.');
   }
+  const existing = sessions.get(sessionKey);
+  if (existing) {
+    if (existing.exited || existing.processExited) {
+      sessions.delete(sessionKey);
+    } else {
+      if (existing.mode !== mode) {
+        throw new Error('Codex CLI session mode mismatch.');
+      }
+      logger.info('[CodexCliTerminal] PTY session reused', {
+        sessionId,
+        sessionKey,
+        userId,
+        mode,
+        pid: existing.ptyProcess.pid,
+        clients: existing.clients.size,
+        serverPid: process.pid,
+        serverInstanceId,
+      });
+      return existing;
+    }
+  }
   const session = new CodexCliSession({ sessionId, userId, mode, cols, rows });
-  sessions.set(sessionId, session);
+  sessions.set(sessionKey, session);
   return session;
+}
+
+function getCodexCliSessions(user) {
+  const userId = normalizeUserId(user);
+  if (!userId) {
+    return [];
+  }
+  return [...sessions.values()]
+    .filter((session) => session.userId === userId)
+    .map((session) => ({
+      sessionId: session.sessionId,
+      mode: session.mode,
+      pid: session.ptyProcess.pid,
+      cwd: session.repoPath,
+      exited: session.exited,
+      clients: session.clients.size,
+      serverPid: process.pid,
+      serverInstanceId,
+    }));
+}
+
+function terminateCodexCliSession(sessionId, user) {
+  const userId = normalizeUserId(user);
+  if (!userId) {
+    return { ok: false, reason: 'missing_user', serverPid: process.pid, serverInstanceId };
+  }
+  const normalized = normalizeSessionId(sessionId);
+  if (!normalized) {
+    return { ok: false, reason: 'invalid_session_id', serverPid: process.pid, serverInstanceId };
+  }
+  const sessionKey = getSessionKey(userId, normalized);
+  markSessionTerminated(sessionKey);
+  const session = sessions.get(sessionKey);
+  if (!session) {
+    logger.info('[CodexCliTerminal] Terminal session already absent during terminate', {
+      sessionId: normalized,
+      sessionKey,
+      userId,
+      serverPid: process.pid,
+      serverInstanceId,
+    });
+    return {
+      ok: true,
+      sessionId: normalized,
+      alreadyEnded: true,
+      serverPid: process.pid,
+      serverInstanceId,
+    };
+  }
+  const pid = session.ptyProcess?.pid;
+  session.terminate();
+  logger.info('[CodexCliTerminal] Terminal session terminate requested', {
+    sessionId: normalized,
+    sessionKey,
+    userId,
+    mode: session.mode,
+    pid,
+    serverPid: process.pid,
+    serverInstanceId,
+  });
+  return { ok: true, sessionId: normalized, pid, serverPid: process.pid, serverInstanceId };
+}
+
+function shutdownCodexCliTerminal() {
+  if (heartbeatTimer) {
+    clearInterval(heartbeatTimer);
+    heartbeatTimer = null;
+  }
+  for (const session of [...sessions.values()]) {
+    session.terminate();
+  }
+  if (websocketServer) {
+    websocketServer.close();
+    websocketServer = null;
+  }
 }
 
 function handleWsConnection(ws, params) {
@@ -491,54 +589,6 @@ function attachCodexCliTerminal(server) {
 
   logger.info('[CodexCliTerminal] WebSocket terminal attached at /api/codex-cli/terminal');
   return websocketServer;
-}
-
-function getCodexCliSessions() {
-  return [...sessions.values()].map((session) => ({
-    sessionId: session.sessionId,
-    mode: session.mode,
-    pid: session.ptyProcess.pid,
-    cwd: session.repoPath,
-    exited: session.exited,
-    clients: session.clients.size,
-  }));
-}
-
-function terminateCodexCliSession(sessionId) {
-  const normalized = normalizeSessionId(sessionId);
-  if (!normalized) {
-    return { ok: false, reason: 'invalid_session_id' };
-  }
-  markSessionTerminated(normalized);
-  const session = sessions.get(normalized);
-  if (!session) {
-    logger.info('[CodexCliTerminal] Terminal session already absent during terminate', {
-      sessionId: normalized,
-    });
-    return { ok: true, sessionId: normalized, alreadyEnded: true };
-  }
-  const pid = session.ptyProcess?.pid;
-  session.terminate();
-  logger.info('[CodexCliTerminal] Terminal session terminate requested', {
-    sessionId: normalized,
-    mode: session.mode,
-    pid,
-  });
-  return { ok: true, sessionId: normalized, pid };
-}
-
-function shutdownCodexCliTerminal() {
-  if (heartbeatTimer) {
-    clearInterval(heartbeatTimer);
-    heartbeatTimer = null;
-  }
-  for (const session of sessions.values()) {
-    session.terminate();
-  }
-  if (websocketServer) {
-    websocketServer.close();
-    websocketServer = null;
-  }
 }
 
 module.exports = {

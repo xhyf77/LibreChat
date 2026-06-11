@@ -27,7 +27,6 @@ const NewChatButton = memo(function NewChatButton({
         navigate(nextPath);
         return;
       }
-      e.currentTarget.href = nextPath;
       if (e.button === 0 && (e.ctrlKey || e.metaKey)) {
         window.open(nextPath, '_blank');
         e.preventDefault();

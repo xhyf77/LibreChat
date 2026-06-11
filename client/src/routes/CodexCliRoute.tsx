@@ -5,7 +5,7 @@ import { FitAddon } from '@xterm/addon-fit';
 import { apiBaseUrl, request } from 'librechat-data-provider';
 import copyToClipboard from 'copy-to-clipboard';
 import { useAuthContext } from '~/hooks';
-import { createTerminalSessionId } from '~/utils';
+import { createTerminalSessionId, createTerminalSessionPath } from '~/utils';
 import '@fontsource/jetbrains-mono/400.css';
 import '@fontsource/jetbrains-mono/700.css';
 import '@xterm/xterm/css/xterm.css';
@@ -183,6 +183,9 @@ export default function CodexCliRoute() {
     if (!activeSessionId || lastSessionIdRef.current === terminalKey) {
       return;
     }
+    reconnectCounter.current += 1;
+    socketRef.current?.close();
+    socketRef.current = null;
     lastSessionIdRef.current = terminalKey;
     hasExitedRef.current = false;
     setExitInfo(null);
@@ -264,7 +267,10 @@ export default function CodexCliRoute() {
         data?: string;
         pid?: number;
         cwd?: string;
+        sessionId?: string;
         mode?: TerminalMode;
+        serverPid?: number;
+        serverInstanceId?: string;
         exitCode?: number;
         signal?: number;
       };
@@ -274,11 +280,32 @@ export default function CodexCliRoute() {
         return;
       }
 
+      if (connectionId !== reconnectCounter.current || socketRef.current !== socket) {
+        return;
+      }
+
       if (message.type === 'data' || message.type === 'replay') {
         terminal.write(message.data ?? '');
         return;
       }
       if (message.type === 'ready') {
+        const gotDifferentSession = !!message.sessionId && message.sessionId !== activeSessionId;
+        const gotDifferentMode = !!message.mode && message.mode !== terminalMode;
+        if (gotDifferentSession || gotDifferentMode) {
+          hasExitedRef.current = true;
+          terminal.writeln(
+            [
+              '\r\n[web terminal] session identity mismatch; connection closed',
+              `expected ${terminalMode}:${activeSessionId}`,
+              `got ${message.mode ?? 'unknown'}:${message.sessionId ?? 'unknown'}`,
+              message.serverPid ? `server pid ${message.serverPid}` : null,
+              '\r\n',
+            ]
+              .filter(Boolean)
+              .join(' · '),
+          );
+          socket.close();
+        }
         return;
       }
       if (message.type === 'exit') {
@@ -308,6 +335,10 @@ export default function CodexCliRoute() {
       }
     });
   }, [activeSessionId, fitAndNotify, isAuthenticated, terminalMode, token]);
+
+  const openFreshTerminal = useCallback(() => {
+    navigate(createTerminalSessionPath(terminalMode));
+  }, [navigate, terminalMode]);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -410,12 +441,13 @@ export default function CodexCliRoute() {
               >
                 Home
               </Link>
-              <Link
-                to={createTerminalSessionPath(terminalMode)}
+              <button
+                type="button"
+                onClick={openFreshTerminal}
                 className="inline-flex h-9 items-center justify-center rounded-md bg-[#4078f2] px-3 text-sm font-medium text-white transition-colors hover:bg-[#2f5fbe] focus:outline-none focus-visible:ring-2 focus-visible:ring-[#4078f2] focus-visible:ring-offset-2"
               >
                 New terminal
-              </Link>
+              </button>
             </div>
           </div>
         </div>

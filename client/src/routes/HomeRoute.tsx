@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import {
   ArrowRight,
@@ -18,6 +18,7 @@ import { createTerminalSessionPath } from '~/utils';
 
 const repoPath = '~/fjj/hm_os/hm-verif-kernel';
 const terminalPollIntervalMs = 4000;
+const endedTerminalTombstoneMs = 10_000;
 
 type TerminalSession = {
   sessionId: string;
@@ -71,9 +72,14 @@ function terminalSessionHref(session: TerminalSession) {
   return `/${session.mode === 'codex' ? 'codex' : 'terminal'}/${session.sessionId}`;
 }
 
+function terminalSessionKey(session: Pick<TerminalSession, 'mode' | 'sessionId'>) {
+  return `${session.mode}:${session.sessionId}`;
+}
+
 export default function HomeRoute() {
   const { user } = useAuthContext();
   const navigate = useNavigate();
+  const endedSessionIdsRef = useRef<Map<string, number>>(new Map());
   const [sessions, setSessions] = useState<TerminalSession[]>([]);
   const [isLoadingSessions, setIsLoadingSessions] = useState(true);
   const [sessionError, setSessionError] = useState<string | null>(null);
@@ -89,7 +95,17 @@ export default function HomeRoute() {
       const data = await request.get<TerminalSessionsResponse>(
         `${apiBaseUrl()}/api/codex-cli/sessions`,
       );
-      setSessions((data.sessions ?? []).filter((session) => !session.exited));
+      const now = Date.now();
+      for (const [sessionId, expiresAt] of endedSessionIdsRef.current.entries()) {
+        if (expiresAt <= now) {
+          endedSessionIdsRef.current.delete(sessionId);
+        }
+      }
+      setSessions(
+        (data.sessions ?? []).filter(
+          (session) => !session.exited && !endedSessionIdsRef.current.has(terminalSessionKey(session)),
+        ),
+      );
     } catch {
       setSessionError('Unable to load terminals');
     } finally {
@@ -106,25 +122,32 @@ export default function HomeRoute() {
   }, [refreshSessions]);
 
   const endSession = useCallback(
-    async (sessionId: string) => {
-      setEndingSessionIds((current) => new Set(current).add(sessionId));
+    async (session: TerminalSession) => {
+      const key = terminalSessionKey(session);
+      endedSessionIdsRef.current.set(key, Date.now() + endedTerminalTombstoneMs);
+      setEndingSessionIds((current) => new Set(current).add(key));
+      setSessions((current) => current.filter((item) => terminalSessionKey(item) !== key));
       try {
         const result = await request.delete<TerminalActionResponse>(
-          `${apiBaseUrl()}/api/codex-cli/sessions/${encodeURIComponent(sessionId)}`,
+          `${apiBaseUrl()}/api/codex-cli/sessions/${encodeURIComponent(session.sessionId)}`,
         );
         if (!result.ok) {
+          endedSessionIdsRef.current.delete(key);
           setSessionError(result.reason || 'Unable to end terminal');
           await refreshSessions();
           return;
         }
-        setSessions((current) => current.filter((session) => session.sessionId !== sessionId));
         window.setTimeout(() => {
           void refreshSessions();
         }, 500);
+      } catch {
+        endedSessionIdsRef.current.delete(key);
+        setSessionError('Unable to end terminal');
+        await refreshSessions();
       } finally {
         setEndingSessionIds((current) => {
           const next = new Set(current);
-          next.delete(sessionId);
+          next.delete(key);
           return next;
         });
       }
@@ -228,11 +251,12 @@ export default function HomeRoute() {
               ) : (
                 <div className="space-y-2">
                   {sessions.map((session) => {
-                    const isEnding = endingSessionIds.has(session.sessionId);
+                    const sessionKey = terminalSessionKey(session);
+                    const isEnding = endingSessionIds.has(sessionKey);
                     const sessionHref = terminalSessionHref(session);
                     return (
                       <div
-                        key={session.sessionId}
+                        key={sessionKey}
                         className="grid gap-3 rounded-md border border-[#e4e4e7] bg-[#fafafa] p-3 sm:grid-cols-[minmax(0,1fr)_auto]"
                       >
                         <Link
@@ -263,7 +287,7 @@ export default function HomeRoute() {
                             type="button"
                             className="inline-flex h-8 items-center justify-center gap-1.5 rounded-md border border-rose-200 bg-white px-3 text-xs font-medium text-rose-700 transition-colors hover:border-rose-300 hover:bg-rose-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-rose-400 disabled:cursor-not-allowed disabled:opacity-60"
                             disabled={isEnding}
-                            onClick={() => void endSession(session.sessionId)}
+                            onClick={() => void endSession(session)}
                           >
                             {isEnding ? (
                               <Loader2 className="size-3.5 animate-spin" aria-hidden="true" />
