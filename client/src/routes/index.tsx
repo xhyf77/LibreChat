@@ -19,6 +19,7 @@ import LoginLayout from './Layouts/Login';
 import dashboardRoutes from './Dashboard';
 import ShareRoute from './ShareRoute';
 import CodexCliRoute from './CodexCliRoute';
+import HomeRoute from './HomeRoute';
 import Search from './Search';
 import Root from './Root';
 
@@ -124,7 +125,7 @@ export const router = createBrowserRouter(
           children: [
             {
               index: true,
-              element: <Navigate to="/terminal/new" replace={true} />,
+              element: <HomeRoute />,
             },
             {
               path: 'terminal/:sessionId?',
