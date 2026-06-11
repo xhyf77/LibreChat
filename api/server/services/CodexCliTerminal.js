@@ -144,6 +144,7 @@ class CodexCliSession {
     this.buffer = '';
     this.clients = new Set();
     this.exited = false;
+    this.processExited = false;
     this.exitInfo = null;
 
     const env = {
@@ -172,18 +173,10 @@ class CodexCliSession {
     });
 
     this.ptyProcess.onExit((event) => {
-      this.exited = true;
-      this.exitInfo = {
+      this.processExited = true;
+      this.finishExit({
         exitCode: event.exitCode,
         signal: event.signal,
-      };
-      this.broadcast({ type: 'exit', ...this.exitInfo });
-      sessions.delete(this.sessionId);
-      logger.info('[CodexCliTerminal] PTY exited', {
-        sessionId: this.sessionId,
-        mode: this.mode,
-        pid: this.ptyProcess.pid,
-        ...this.exitInfo,
       });
     });
 
@@ -253,6 +246,30 @@ class CodexCliSession {
     }
   }
 
+  finishExit(exitInfo = {}) {
+    if (this.exited) {
+      return false;
+    }
+    this.exited = true;
+    this.exitInfo = exitInfo;
+    sessions.delete(this.sessionId);
+    this.broadcast({ type: 'exit', ...exitInfo });
+    for (const client of this.clients) {
+      try {
+        client.close(1000, 'Terminal session ended');
+      } catch {
+        // Ignore close races.
+      }
+    }
+    logger.info('[CodexCliTerminal] PTY exited', {
+      sessionId: this.sessionId,
+      mode: this.mode,
+      pid: this.ptyProcess.pid,
+      ...exitInfo,
+    });
+    return true;
+  }
+
   write(data) {
     if (this.exited || typeof data !== 'string') {
       return;
@@ -282,10 +299,11 @@ class CodexCliSession {
     if (this.exited) {
       return;
     }
+    this.finishExit({ signal: 15 });
     try {
       this.ptyProcess.kill('SIGTERM');
       setTimeout(() => {
-        if (!this.exited) {
+        if (!this.processExited) {
           this.ptyProcess.kill('SIGKILL');
         }
       }, 1500).unref?.();
