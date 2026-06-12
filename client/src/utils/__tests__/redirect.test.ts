@@ -2,6 +2,7 @@ import {
   persistRedirectToSession,
   getPostLoginRedirect,
   isSafeRedirect,
+  requiresFullPageRedirect,
   SESSION_KEY,
 } from '../redirect';
 
@@ -180,5 +181,21 @@ describe('persistRedirectToSession', () => {
   it('rejects /login paths', () => {
     persistRedirectToSession('/login?redirect_to=/c/new');
     expect(sessionStorage.getItem(SESSION_KEY)).toBeNull();
+  });
+});
+
+describe('requiresFullPageRedirect', () => {
+  it('uses a full page redirect for the diff app root', () => {
+    expect(requiresFullPageRedirect('/diff')).toBe(true);
+    expect(requiresFullPageRedirect('/diff/')).toBe(true);
+  });
+
+  it('uses a full page redirect for diff deep links', () => {
+    expect(requiresFullPageRedirect('/diff/server?path=/repo#file')).toBe(true);
+  });
+
+  it('keeps LibreChat routes inside React Router', () => {
+    expect(requiresFullPageRedirect('/terminal/new')).toBe(false);
+    expect(requiresFullPageRedirect('/c/new')).toBe(false);
   });
 });

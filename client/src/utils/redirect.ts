@@ -3,6 +3,7 @@ export const SESSION_KEY = 'post_login_redirect_to';
 
 /** Matches `/login` as a full path segment, with optional basename prefix (e.g. `/librechat/login/2fa`) */
 const LOGIN_PATH_RE = /(?:^|\/)login(?:\/|$)/;
+const EXTERNAL_APP_PREFIXES = ['/diff'];
 
 /** Validates that a redirect target is a safe relative path (not an absolute or protocol-relative URL) */
 export function isSafeRedirect(url: string): boolean {
@@ -38,4 +39,9 @@ export function persistRedirectToSession(value: string): void {
   if (isSafeRedirect(value)) {
     sessionStorage.setItem(SESSION_KEY, value);
   }
+}
+
+export function requiresFullPageRedirect(url: string): boolean {
+  const path = url.split('?')[0].split('#')[0];
+  return EXTERNAL_APP_PREFIXES.some((prefix) => path === prefix || path.startsWith(`${prefix}/`));
 }

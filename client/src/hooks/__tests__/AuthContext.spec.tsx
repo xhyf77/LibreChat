@@ -191,6 +191,40 @@ describe('AuthContextProvider — login onError redirect handling', () => {
   });
 });
 
+describe('AuthContextProvider — login success cross-app redirect', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    sessionStorage.clear();
+  });
+
+  afterEach(() => {
+    sessionStorage.clear();
+    window.history.replaceState({}, '', '/');
+  });
+
+  it('uses a full page redirect for diff workspace redirects', () => {
+    jest.useFakeTimers();
+    const replaceSpy = jest.spyOn(window.location, 'replace').mockImplementation(() => {});
+    window.history.replaceState({}, '', '/login?redirect_to=%2Fdiff%2F');
+
+    renderProvider();
+
+    act(() => {
+      mockCapturedLoginOptions.onSuccess({
+        user: { id: '1', role: 'USER' },
+        token: 'new-token',
+      });
+    });
+    act(() => {
+      jest.advanceTimersByTime(100);
+    });
+
+    expect(replaceSpy).toHaveBeenCalledWith('/diff/');
+    expect(mockNavigate).not.toHaveBeenCalledWith('/diff/', expect.anything());
+    jest.useRealTimers();
+  });
+});
+
 describe('AuthContextProvider — logout onSuccess/onError handling', () => {
   const mockSetTokenHeader = jest.requireMock('librechat-data-provider').setTokenHeader;
 
@@ -282,6 +316,32 @@ describe('AuthContextProvider — silentRefresh post-login redirect', () => {
     expect(mockNavigate).toHaveBeenCalledWith('/c/new?endpoint=bedrock&model=claude-sonnet-4-6', {
       replace: true,
     });
+    expect(sessionStorage.getItem(SESSION_KEY)).toBeNull();
+    jest.useRealTimers();
+  });
+
+  it('uses a full page redirect for stored diff redirects after token refresh', () => {
+    jest.useFakeTimers();
+    const replaceSpy = jest.spyOn(window.location, 'replace').mockImplementation(() => {});
+    sessionStorage.setItem(SESSION_KEY, '/diff/server?path=/repo');
+
+    renderProviderLive();
+
+    expect(mockRefreshMutate).toHaveBeenCalledTimes(1);
+    const [, refreshOptions] = mockRefreshMutate.mock.calls[0] as [
+      unknown,
+      { onSuccess: (data: unknown) => void },
+    ];
+
+    act(() => {
+      refreshOptions.onSuccess({ user: { id: '1', role: 'USER' }, token: 'new-token' });
+    });
+    act(() => {
+      jest.advanceTimersByTime(100);
+    });
+
+    expect(replaceSpy).toHaveBeenCalledWith('/diff/server?path=/repo');
+    expect(mockNavigate).not.toHaveBeenCalledWith('/diff/server?path=/repo', expect.anything());
     expect(sessionStorage.getItem(SESSION_KEY)).toBeNull();
     jest.useRealTimers();
   });
