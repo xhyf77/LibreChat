@@ -2,7 +2,7 @@ const http = require('http');
 const fetch = require('node-fetch');
 
 const DEFAULT_API_BASE = 'http://127.0.0.1:8000/api';
-const DEFAULT_PROJECT_ID = 'hm-verif-kernel';
+const DEFAULT_PROJECT_ID = 'example-repo';
 const TERMINAL_STATUSES = new Set(['succeeded', 'failed', 'canceled']);
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));

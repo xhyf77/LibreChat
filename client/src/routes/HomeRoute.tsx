@@ -16,7 +16,7 @@ import { apiBaseUrl, request } from 'librechat-data-provider';
 import { useAuthContext } from '~/hooks';
 import { createTerminalSessionPath } from '~/utils';
 
-const repoPath = '~/fjj/hm_os/hm-verif-kernel';
+const repoPath = '~/work/example-repo';
 const terminalPollIntervalMs = 4000;
 const endedTerminalTombstoneMs = 10_000;
 
@@ -84,7 +84,7 @@ export default function HomeRoute() {
   const [isLoadingSessions, setIsLoadingSessions] = useState(true);
   const [sessionError, setSessionError] = useState<string | null>(null);
   const [endingSessionIds, setEndingSessionIds] = useState<Set<string>>(() => new Set());
-  const displayName = user?.name || user?.username || user?.email || 'xieminhui';
+  const displayName = user?.name || user?.username || user?.email || 'connect-user';
 
   const refreshSessions = useCallback(async (showLoading = false) => {
     if (showLoading) {

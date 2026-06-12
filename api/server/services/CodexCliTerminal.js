@@ -7,8 +7,8 @@ const { Terminal: HeadlessTerminal } = require('@xterm/headless');
 const { SerializeAddon } = require('@xterm/addon-serialize');
 const { logger } = require('@librechat/data-schemas');
 
-const DEFAULT_REPO_PATH = '/home/xieminhui/fjj/hm_os/hm-verif-kernel';
-const DEFAULT_CODEX_HOME = '/home/xieminhui/fjj/.codex';
+const DEFAULT_REPO_PATH = '/srv/work/example-repo';
+const DEFAULT_CODEX_HOME = '/home/connect/.codex';
 const TICKET_TTL_MS = 30_000;
 const TERMINATED_SESSION_TTL_MS = 60_000;
 const MAX_REPLAY_BYTES = 1024 * 1024;
