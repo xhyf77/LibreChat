@@ -13,7 +13,15 @@ const {
 
 const router = express.Router();
 
+router.use((req, res, next) => {
+  req.socket?.setNoDelay?.(true);
+  res.socket?.setNoDelay?.(true);
+  next();
+});
+
 router.get('/sessions/:sessionId/events', (req, res) => {
+  req.setTimeout?.(0);
+  res.setTimeout?.(0);
   const result = attachCodexCliEventStream({
     ticket: req.query.ticket,
     sessionId: req.params.sessionId,
@@ -66,6 +74,8 @@ router.post('/sessions/:sessionId/input', (req, res) => {
 });
 
 router.post('/sessions/:sessionId/input-stream', (req, res) => {
+  req.setTimeout?.(0);
+  res.setTimeout?.(0);
   attachCodexCliInputStream(req.params.sessionId, req.user, req, res);
 });
 

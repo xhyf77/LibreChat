@@ -11,11 +11,11 @@ const DEFAULT_REPO_PATH = '/home/xieminhui/fjj/hm_os/hm-verif-kernel';
 const DEFAULT_CODEX_HOME = '/home/xieminhui/fjj/.codex';
 const TICKET_TTL_MS = 30_000;
 const TERMINATED_SESSION_TTL_MS = 60_000;
-const MAX_REPLAY_BYTES = 2 * 1024 * 1024;
-const DEFAULT_REPLAY_SCROLLBACK_ROWS = 3000;
-const COMPACT_REPLAY_SCROLLBACK_ROWS = 500;
-const MAX_ATTACH_BACKLOG_BYTES = 2 * 1024 * 1024;
-const LIVE_OUTPUT_FLUSH_MS = 8;
+const MAX_REPLAY_BYTES = 1024 * 1024;
+const DEFAULT_REPLAY_SCROLLBACK_ROWS = 1500;
+const COMPACT_REPLAY_SCROLLBACK_ROWS = 300;
+const MAX_ATTACH_BACKLOG_BYTES = 1024 * 1024;
+const LIVE_OUTPUT_FLUSH_MS = 4;
 const LIVE_OUTPUT_FLUSH_CHARS = 64 * 1024;
 const HEARTBEAT_INTERVAL_MS = 30_000;
 const SSE_HEARTBEAT_INTERVAL_MS = 15_000;
@@ -219,6 +219,7 @@ function serializeSession(session) {
 
 function writeSseMessage(res, message) {
   res.write(`data: ${JSON.stringify(message)}\n\n`);
+  res.flush?.();
 }
 
 class CodexCliSession {
@@ -842,6 +843,12 @@ function terminateCodexCliSession(sessionId, user) {
 }
 
 function attachCodexCliEventStream({ ticket: ticketValue, sessionId: sessionIdValue, mode, res }) {
+  res.req?.socket?.setNoDelay?.(true);
+  res.req?.socket?.setKeepAlive?.(true, 30_000);
+  res.req?.setTimeout?.(0);
+  res.socket?.setNoDelay?.(true);
+  res.socket?.setKeepAlive?.(true, 30_000);
+  res.setTimeout?.(0);
   const ticket = consumeTicket(ticketValue);
   if (!ticket) {
     res.status(401).json({ ok: false, reason: 'Unauthorized' });
@@ -935,6 +942,12 @@ function writeCodexCliSessionInput(sessionIdValue, user, data) {
 }
 
 function attachCodexCliInputStream(sessionIdValue, user, req, res) {
+  req.socket?.setNoDelay?.(true);
+  req.socket?.setKeepAlive?.(true, 30_000);
+  req.setTimeout?.(0);
+  res.socket?.setNoDelay?.(true);
+  res.socket?.setKeepAlive?.(true, 30_000);
+  res.setTimeout?.(0);
   const userId = normalizeUserId(user);
   const sessionId = normalizeSessionId(sessionIdValue);
   if (!userId || !sessionId) {
@@ -1051,6 +1064,8 @@ function shutdownCodexCliTerminal() {
 }
 
 function handleWsConnection(ws, _request, params) {
+  ws._socket?.setNoDelay?.(true);
+  ws._socket?.setKeepAlive?.(true, 30_000);
   const { userId, sessionId, mode, cols, rows } = params;
   let session;
   try {
@@ -1119,6 +1134,8 @@ function attachCodexCliTerminal(server) {
   websocketServer = new WebSocketServer({ noServer: true, maxPayload: 1024 * 1024 });
 
   server.on('upgrade', (request, socket, head) => {
+    socket.setNoDelay?.(true);
+    socket.setKeepAlive?.(true, 30_000);
     let url;
     try {
       url = new URL(request.url, 'http://localhost');

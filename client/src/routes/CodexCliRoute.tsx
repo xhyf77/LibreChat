@@ -7,6 +7,12 @@ import { WebglAddon } from '@xterm/addon-webgl';
 import { apiBaseUrl, request } from 'librechat-data-provider';
 import copyToClipboard from 'copy-to-clipboard';
 import { useAuthContext } from '~/hooks';
+import {
+  clearHttpTerminalFallback,
+  createTerminalSessionPath,
+  rememberHttpTerminalFallback,
+  shouldStartTerminalWithHttpFallback,
+} from '~/utils';
 import '@fontsource/jetbrains-mono/400.css';
 import '@fontsource/jetbrains-mono/700.css';
 import '@xterm/xterm/css/xterm.css';
@@ -62,44 +68,48 @@ type TerminalServerMessage = {
 
 const atomOneLightTheme = {
   background: '#fafafa',
-  foreground: '#383a42',
+  foreground: '#202227',
   cursor: '#526fff',
   cursorAccent: '#fafafa',
   selectionBackground: '#e5e5e6',
-  black: '#383a42',
-  red: '#e45649',
-  green: '#50a14f',
-  yellow: '#c18401',
-  blue: '#4078f2',
-  magenta: '#a626a4',
-  cyan: '#0184bc',
-  white: '#a0a1a7',
-  brightBlack: '#696c77',
-  brightRed: '#ca1243',
-  brightGreen: '#50a14f',
-  brightYellow: '#986801',
-  brightBlue: '#4078f2',
-  brightMagenta: '#a626a4',
-  brightCyan: '#0184bc',
-  brightWhite: '#f0f0f0',
+  black: '#202227',
+  red: '#b8292f',
+  green: '#2d7d35',
+  yellow: '#7c5b00',
+  blue: '#245fc7',
+  magenta: '#8b2388',
+  cyan: '#007197',
+  white: '#4b4f58',
+  brightBlack: '#5f626b',
+  brightRed: '#9f1239',
+  brightGreen: '#256f30',
+  brightYellow: '#684900',
+  brightBlue: '#1f55b5',
+  brightMagenta: '#7d1f79',
+  brightCyan: '#005f80',
+  brightWhite: '#202227',
 };
 
 const terminalFont =
   '"JetBrainsMono Nerd Font Mono", "JetBrains Mono", "Symbols Nerd Font Mono", "Roboto Mono", "SFMono-Regular", "SF Mono", "Cascadia Code", Menlo, Consolas, "Liberation Mono", monospace';
 const terminalFontSize = 14;
-const terminalScrollbackRows = 10000;
-const terminalSnapshotScrollbackRows = 1500;
-const terminalSnapshotMaxBytes = 512 * 1024;
+const terminalScrollbackRows = 4000;
+const terminalSnapshotScrollbackRows = 800;
+const terminalSnapshotMaxBytes = 320 * 1024;
 const terminalSnapshotMinIntervalMs = 3000;
 const terminalSnapshotSlowMs = 120;
 const terminalSnapshotSlowBackoffMs = 15000;
 const terminalSnapshotTtlMs = 30000;
 const terminalReplayChunkChars = 64 * 1024;
 const terminalLiveWriteFlushChars = 48 * 1024;
-const terminalHiddenWriteFlushMs = 32;
+const terminalLiveDirectWriteChars = 2048;
+const terminalLiveDirectWriteMinIntervalMs = 6;
+const terminalHiddenBacklogMaxChars = 256 * 1024;
 const terminalRestoreThrottleMs = 250;
 const terminalResponseSuppressMs = 1500;
-const httpInputFlushMs = 8;
+const httpInputFlushMs = 1;
+const websocketFallbackMs = 1800;
+const pendingReconnectInputFlushMs = 150;
 const pendingReconnectInputLimit = 1024 * 1024;
 const terminalQueryResponsePattern =
   /^(?:\x1b\[[?>]?[0-9;]*[Rc]|\x1b\](?:10|11);rgb:[0-9a-fA-F]{1,4}\/[0-9a-fA-F]{1,4}\/[0-9a-fA-F]{1,4}(?:\x07|\x1b\\))+$/;
@@ -339,6 +349,7 @@ export default function CodexCliRoute() {
   const terminalOutputBufferRef = useRef('');
   const terminalOutputFrameRef = useRef(0);
   const terminalOutputTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastDirectTerminalWriteAtRef = useRef(0);
   const suppressTerminalResponsesUntilRef = useRef(0);
   const hasExitedRef = useRef(false);
   const [reconnectNonce, setReconnectNonce] = useState(0);
@@ -399,10 +410,6 @@ export default function CodexCliRoute() {
       return;
     }
     if (typeof document !== 'undefined' && document.hidden) {
-      terminalOutputTimerRef.current = setTimeout(() => {
-        terminalOutputTimerRef.current = null;
-        flushQueuedTerminalOutput();
-      }, terminalHiddenWriteFlushMs);
       return;
     }
     terminalOutputFrameRef.current = window.requestAnimationFrame(() => {
@@ -415,6 +422,28 @@ export default function CodexCliRoute() {
     (data: string) => {
       if (!data) {
         return;
+      }
+      if (typeof document !== 'undefined' && document.hidden) {
+        terminalOutputBufferRef.current += data;
+        if (terminalOutputBufferRef.current.length > terminalHiddenBacklogMaxChars) {
+          terminalOutputBufferRef.current = '';
+          resetBeforeReplayRef.current = true;
+          reconnectOnVisibleRef.current = true;
+        }
+        scheduleQueuedTerminalOutput();
+        return;
+      }
+      if (
+        !terminalOutputBufferRef.current &&
+        data.length <= terminalLiveDirectWriteChars &&
+        Date.now() - lastDirectTerminalWriteAtRef.current >= terminalLiveDirectWriteMinIntervalMs
+      ) {
+        const terminal = terminalRef.current;
+        if (terminal) {
+          lastDirectTerminalWriteAtRef.current = Date.now();
+          writeTerminalData(terminal, data);
+          return;
+        }
       }
       terminalOutputBufferRef.current += data;
       if (terminalOutputBufferRef.current.length >= terminalLiveWriteFlushChars) {
@@ -762,13 +791,9 @@ export default function CodexCliRoute() {
 
     if (transportRef.current === 'sse') {
       pendingReconnectInputRef.current = '';
-      postTerminalJson(`/api/codex-cli/sessions/${encodeURIComponent(session)}/input`, { data })
-        .catch(() => {
-          queueReconnectInput(data);
-          markInputTransportStale();
-        });
+      queueHttpInput(data);
     }
-  }, [markInputTransportStale, postTerminalJson, queueReconnectInput]);
+  }, [markInputTransportStale, queueHttpInput, queueReconnectInput]);
 
   const sendHttpResize = useCallback((cols: number, rows: number) => {
     const session = activeSessionIdRef.current;
@@ -845,7 +870,15 @@ export default function CodexCliRoute() {
     return () => {
       cancelled = true;
     };
-  }, [activeSessionId, closeTransports, isAuthenticated, navigate, routePrefix, terminalMode, token]);
+  }, [
+    activeSessionId,
+    closeTransports,
+    isAuthenticated,
+    navigate,
+    routePrefix,
+    terminalMode,
+    token,
+  ]);
 
   useEffect(() => {
     if (!activeSessionId) {
@@ -974,7 +1007,7 @@ export default function CodexCliRoute() {
           pendingInputFlushTimerRef.current = setTimeout(() => {
             pendingInputFlushTimerRef.current = null;
             flushPendingReconnectInput();
-          }, 1200);
+          }, pendingReconnectInputFlushMs);
         }
         return;
       }
@@ -1077,6 +1110,11 @@ export default function CodexCliRoute() {
       });
     };
 
+    if (shouldStartTerminalWithHttpFallback()) {
+      void connectWithEventSource();
+      return;
+    }
+
     let ticketResponse: TicketResponse;
     try {
       ticketResponse = await requestTicket();
@@ -1104,10 +1142,18 @@ export default function CodexCliRoute() {
     connectedRef.current = false;
     let sawReady = false;
     let fallbackStarted = false;
+    let fallbackTimer: ReturnType<typeof window.setTimeout> | null = null;
+    const clearFallbackTimer = () => {
+      if (fallbackTimer) {
+        window.clearTimeout(fallbackTimer);
+        fallbackTimer = null;
+      }
+    };
     const startFallback = () => {
       if (fallbackStarted || sawReady || hasExitedRef.current || connectionId !== reconnectCounter.current) {
         return;
       }
+      clearFallbackTimer();
       fallbackStarted = true;
       if (socketRef.current === socket) {
         socketRef.current = null;
@@ -1118,11 +1164,18 @@ export default function CodexCliRoute() {
       } catch {
         // Ignore close races.
       }
+      rememberHttpTerminalFallback();
       void connectWithEventSource();
     };
+    fallbackTimer = window.setTimeout(() => {
+      if (!sawReady) {
+        startFallback();
+      }
+    }, websocketFallbackMs);
 
     socket.addEventListener('open', () => {
       if (connectionId !== reconnectCounter.current) {
+        clearFallbackTimer();
         socket.close();
         return;
       }
@@ -1155,11 +1208,14 @@ export default function CodexCliRoute() {
 
       if (message.type === 'ready') {
         sawReady = true;
+        clearFallbackTimer();
+        clearHttpTerminalFallback();
       }
       handleTerminalMessage(message, () => socket.close());
     });
 
     socket.addEventListener('close', () => {
+      clearFallbackTimer();
       if (!sawReady) {
         startFallback();
         return;
@@ -1226,6 +1282,7 @@ export default function CodexCliRoute() {
       fontWeight: 400,
       fontWeightBold: 700,
       lineHeight: 1.18,
+      minimumContrastRatio: 4.5,
       scrollback: terminalScrollbackRows,
       theme: atomOneLightTheme,
       windowsMode: false,
@@ -1361,6 +1418,7 @@ export default function CodexCliRoute() {
           return;
         }
 
+        flushQueuedTerminalOutput();
         fitAndNotify();
         terminal.refresh(0, Math.max(0, terminal.rows - 1));
         const needsReconnect =
@@ -1435,6 +1493,7 @@ export default function CodexCliRoute() {
     cancelPendingSnapshot,
     closeInputStream,
     fitAndNotify,
+    flushQueuedTerminalOutput,
     isTransportUsable,
     requestReconnect,
     restoreTerminalSnapshotIfBlank,

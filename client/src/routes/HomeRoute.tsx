@@ -194,11 +194,7 @@ export default function HomeRoute() {
         </section>
 
         <section className="grid gap-4 lg:grid-cols-[minmax(0,0.9fr)_minmax(380px,1.1fr)]">
-          <button
-            type="button"
-            className="group flex min-h-[232px] flex-col justify-between rounded-lg border border-[#d9d9dc] bg-white p-5 text-left shadow-sm transition-colors hover:border-[#b8bbc3] hover:bg-[#fbfbfb] focus:outline-none focus-visible:ring-2 focus-visible:ring-[#4078f2]"
-            onClick={openNewTerminal}
-          >
+          <section className="flex min-h-[232px] flex-col justify-between rounded-lg border border-[#d9d9dc] bg-white p-5 text-left shadow-sm">
             <div>
               <div className="mb-5 flex size-10 items-center justify-center rounded-md bg-blue-500/10 text-blue-600">
                 <TerminalSquare className="size-5" aria-hidden="true" />
@@ -207,12 +203,19 @@ export default function HomeRoute() {
               <p className="mt-2 text-sm leading-6 text-[#5f626b]">
                 Start a fresh PTY in the server workspace. Each browser tab maps to one live terminal.
               </p>
+              <p className="mt-4 text-xs leading-5 text-[#696c77]">
+                Transport is automatic: WebSocket first, with HTTP fallback remembered for restricted networks.
+              </p>
             </div>
-            <div className="mt-5 flex items-center gap-2 text-sm font-medium text-[#2f5fbe]">
+            <button
+              type="button"
+              className="group mt-5 inline-flex h-10 w-fit items-center justify-center gap-2 rounded-md bg-[#4078f2] px-3 text-sm font-medium text-white transition-colors hover:bg-[#2f5fbe] focus:outline-none focus-visible:ring-2 focus-visible:ring-[#4078f2] focus-visible:ring-offset-2"
+              onClick={openNewTerminal}
+            >
               Open terminal
               <ArrowRight className="size-4 transition-transform group-hover:translate-x-0.5" aria-hidden="true" />
-            </div>
-          </button>
+            </button>
+          </section>
 
           <section className="rounded-lg border border-[#d9d9dc] bg-white p-5 shadow-sm">
             <div className="flex items-start justify-between gap-3 border-b border-[#e4e4e7] pb-4">
