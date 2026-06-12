@@ -1,7 +1,7 @@
 export type WebTerminalMode = 'shell' | 'codex';
 
 const httpFallbackUntilKey = 'ruc-terminal-http-fallback-until';
-const httpFallbackTtlMs = 10 * 60 * 1000;
+const httpFallbackTtlMs = 60 * 60 * 1000;
 
 export function rememberHttpTerminalFallback() {
   if (typeof window === 'undefined') {

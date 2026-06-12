@@ -109,6 +109,7 @@ const terminalRestoreThrottleMs = 250;
 const terminalResponseSuppressMs = 1500;
 const httpInputFlushMs = 1;
 const websocketFallbackMs = 1800;
+const websocketUnstableCloseMs = 120_000;
 const pendingReconnectInputFlushMs = 150;
 const pendingReconnectInputLimit = 1024 * 1024;
 const terminalQueryResponsePattern =
@@ -1142,6 +1143,7 @@ export default function CodexCliRoute() {
     connectedRef.current = false;
     let sawReady = false;
     let fallbackStarted = false;
+    let websocketReadyAt = 0;
     let fallbackTimer: ReturnType<typeof window.setTimeout> | null = null;
     const clearFallbackTimer = () => {
       if (fallbackTimer) {
@@ -1208,6 +1210,7 @@ export default function CodexCliRoute() {
 
       if (message.type === 'ready') {
         sawReady = true;
+        websocketReadyAt = Date.now();
         clearFallbackTimer();
         clearHttpTerminalFallback();
       }
@@ -1226,6 +1229,9 @@ export default function CodexCliRoute() {
         transportRef.current = null;
         connectedRef.current = false;
         if (!hasExitedRef.current) {
+          if (websocketReadyAt && Date.now() - websocketReadyAt < websocketUnstableCloseMs) {
+            rememberHttpTerminalFallback();
+          }
           resetBeforeReplayRef.current = true;
           if (typeof document !== 'undefined' && document.hidden) {
             reconnectOnVisibleRef.current = true;
