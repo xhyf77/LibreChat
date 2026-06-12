@@ -1,13 +1,32 @@
 const express = require('express');
 const requireJwtAuth = require('~/server/middleware/requireJwtAuth');
 const {
+  attachCodexCliEventStream,
   createCodexCliSession,
   createCodexCliTicket,
   getCodexCliSessions,
+  resizeCodexCliSession,
   terminateCodexCliSession,
+  writeCodexCliSessionInput,
 } = require('~/server/services/CodexCliTerminal');
 
 const router = express.Router();
+
+router.get('/sessions/:sessionId/events', (req, res) => {
+  const result = attachCodexCliEventStream({
+    ticket: req.query.ticket,
+    sessionId: req.params.sessionId,
+    mode: req.query.mode,
+    res,
+  });
+  if (!result) {
+    return;
+  }
+  req.on('close', () => {
+    result.client.close();
+  });
+});
+
 router.use(requireJwtAuth);
 
 router.post('/ticket', (req, res) => {
@@ -38,6 +57,16 @@ router.get('/sessions', (req, res) => {
 
 router.delete('/sessions/:sessionId', (req, res) => {
   res.json(terminateCodexCliSession(req.params.sessionId, req.user));
+});
+
+router.post('/sessions/:sessionId/input', (req, res) => {
+  const result = writeCodexCliSessionInput(req.params.sessionId, req.user, req.body?.data);
+  res.status(result.ok ? 200 : 400).json(result);
+});
+
+router.post('/sessions/:sessionId/resize', (req, res) => {
+  const result = resizeCodexCliSession(req.params.sessionId, req.user, req.body);
+  res.status(result.ok ? 200 : 400).json(result);
 });
 
 module.exports = router;

@@ -10,6 +10,7 @@ const TICKET_TTL_MS = 30_000;
 const TERMINATED_SESSION_TTL_MS = 60_000;
 const MAX_REPLAY_BYTES = 2 * 1024 * 1024;
 const HEARTBEAT_INTERVAL_MS = 30_000;
+const SSE_HEARTBEAT_INTERVAL_MS = 15_000;
 
 const tickets = new Map();
 const sessions = new Map();
@@ -193,10 +194,14 @@ function serializeSession(session) {
     pid: session.ptyProcess.pid,
     cwd: session.repoPath,
     exited: session.exited,
-    clients: session.clients.size,
+    clients: session.clients.size + session.eventClients.size,
     serverPid: process.pid,
     serverInstanceId,
   };
+}
+
+function writeSseMessage(res, message) {
+  res.write(`data: ${JSON.stringify(message)}\n\n`);
 }
 
 class CodexCliSession {
@@ -207,6 +212,7 @@ class CodexCliSession {
     this.repoPath = getRepoPath();
     this.buffer = '';
     this.clients = new Set();
+    this.eventClients = new Set();
     this.exited = false;
     this.processExited = false;
     this.exitInfo = null;
@@ -307,6 +313,54 @@ class CodexCliSession {
     }
   }
 
+  attachEventStream(res) {
+    const client = {
+      res,
+      heartbeatTimer: null,
+      close: () => {
+        clearInterval(client.heartbeatTimer);
+        this.eventClients.delete(client);
+        if (!res.destroyed) {
+          res.end();
+        }
+      },
+      send: (message) => {
+        if (!res.destroyed) {
+          writeSseMessage(res, message);
+        }
+      },
+    };
+
+    this.eventClients.add(client);
+    client.heartbeatTimer = setInterval(() => {
+      if (res.destroyed) {
+        client.close();
+        return;
+      }
+      res.write(': keepalive\n\n');
+    }, SSE_HEARTBEAT_INTERVAL_MS);
+    client.heartbeatTimer.unref?.();
+
+    client.send({
+      type: 'ready',
+      sessionId: this.sessionId,
+      mode: this.mode,
+      pid: this.ptyProcess.pid,
+      cwd: this.repoPath,
+      serverPid: process.pid,
+      serverInstanceId,
+    });
+    if (this.buffer) {
+      client.send({ type: 'replay', data: this.buffer });
+    }
+    if (this.exited && this.exitInfo) {
+      client.send({ type: 'exit', ...this.exitInfo });
+      client.close();
+    }
+
+    return client;
+  }
+
   detach(ws) {
     this.clients.delete(ws);
   }
@@ -314,6 +368,9 @@ class CodexCliSession {
   broadcast(message) {
     for (const client of this.clients) {
       wsSend(client, message);
+    }
+    for (const client of this.eventClients) {
+      client.send(message);
     }
   }
 
@@ -331,6 +388,9 @@ class CodexCliSession {
       } catch {
         // Ignore close races.
       }
+    }
+    for (const client of [...this.eventClients]) {
+      client.close();
     }
     const exitLog = {
       sessionId: this.sessionId,
@@ -480,6 +540,26 @@ function getSessionForAttach({ sessionId, userId, mode }) {
   return existing;
 }
 
+function getActiveSession({ sessionId, userId }) {
+  const sessionKey = getSessionKey(userId, sessionId);
+  if (wasSessionTerminated(sessionKey)) {
+    const endedSession = sessions.get(sessionKey);
+    if (endedSession && !endedSession.exited) {
+      endedSession.terminate();
+    }
+    throw new Error('Terminal session was ended.');
+  }
+  const existing = sessions.get(sessionKey);
+  if (!existing) {
+    throw new Error('Terminal session does not exist.');
+  }
+  if (existing.exited || existing.processExited) {
+    sessions.delete(sessionKey);
+    throw new Error('Terminal session has exited.');
+  }
+  return existing;
+}
+
 function getCodexCliSessions(user) {
   const userId = normalizeUserId(user);
   if (!userId) {
@@ -547,6 +627,121 @@ function terminateCodexCliSession(sessionId, user) {
     terminateLog,
   );
   return { ok: true, sessionId: normalized, pid, serverPid: process.pid, serverInstanceId };
+}
+
+function attachCodexCliEventStream({ ticket: ticketValue, sessionId: sessionIdValue, mode, res }) {
+  const ticket = consumeTicket(ticketValue);
+  if (!ticket) {
+    res.status(401).json({ ok: false, reason: 'Unauthorized' });
+    return null;
+  }
+
+  const sessionId = normalizeSessionId(sessionIdValue);
+  if (!sessionId) {
+    res.status(400).json({ ok: false, reason: 'Invalid terminal session id.' });
+    return null;
+  }
+
+  const normalizedMode = normalizeMode(mode);
+  if (
+    (ticket.sessionId && ticket.sessionId !== sessionId) ||
+    (ticket.mode && ticket.mode !== normalizedMode)
+  ) {
+    const mismatchLog = {
+      ticketSessionId: ticket.sessionId,
+      querySessionId: sessionId,
+      ticketMode: ticket.mode,
+      queryMode: normalizedMode,
+      userId: ticket.userId,
+      serverPid: process.pid,
+      serverInstanceId,
+    };
+    logger.warn(
+      `[CodexCliTerminal] SSE ticket mismatch ${formatLogFields(mismatchLog)}`,
+      mismatchLog,
+    );
+    res.status(403).json({ ok: false, reason: 'Forbidden' });
+    return null;
+  }
+
+  let session;
+  try {
+    session = getSessionForAttach({
+      sessionId,
+      userId: ticket.userId,
+      mode: normalizedMode,
+    });
+  } catch (error) {
+    const attachError = {
+      sessionId,
+      sessionKey: getSessionKey(ticket.userId, sessionId),
+      userId: ticket.userId,
+      mode: normalizedMode,
+      serverPid: process.pid,
+      serverInstanceId,
+      error: error?.message ?? error,
+    };
+    logger.warn(`[CodexCliTerminal] SSE attach failed ${formatLogFields(attachError)}`, attachError);
+    res.status(404).json({ ok: false, reason: 'Terminal session unavailable.' });
+    return null;
+  }
+
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream; charset=utf-8',
+    'Cache-Control': 'no-cache, no-transform',
+    Connection: 'keep-alive',
+    'X-Accel-Buffering': 'no',
+  });
+  res.flushHeaders?.();
+  res.write(': connected\n\n');
+
+  const client = session.attachEventStream(res);
+  return { client, session };
+}
+
+function writeCodexCliSessionInput(sessionIdValue, user, data) {
+  const userId = normalizeUserId(user);
+  const sessionId = normalizeSessionId(sessionIdValue);
+  if (!userId || !sessionId) {
+    return { ok: false, reason: 'invalid_request', serverPid: process.pid, serverInstanceId };
+  }
+  if (typeof data !== 'string' || data.length > 65536) {
+    return { ok: false, reason: 'invalid_input', serverPid: process.pid, serverInstanceId };
+  }
+  try {
+    const session = getActiveSession({ sessionId, userId });
+    session.write(data);
+    return { ok: true, sessionId, serverPid: process.pid, serverInstanceId };
+  } catch (error) {
+    return {
+      ok: false,
+      reason: error?.message || 'unable_to_write',
+      serverPid: process.pid,
+      serverInstanceId,
+    };
+  }
+}
+
+function resizeCodexCliSession(sessionIdValue, user, options = {}) {
+  const userId = normalizeUserId(user);
+  const sessionId = normalizeSessionId(sessionIdValue);
+  if (!userId || !sessionId) {
+    return { ok: false, reason: 'invalid_request', serverPid: process.pid, serverInstanceId };
+  }
+  try {
+    const session = getActiveSession({ sessionId, userId });
+    const cols = clampTerminalSize(options.cols, 120, 20, 300);
+    const rows = clampTerminalSize(options.rows, 36, 8, 120);
+    session.resize(cols, rows);
+    return { ok: true, sessionId, cols, rows, serverPid: process.pid, serverInstanceId };
+  } catch (error) {
+    return {
+      ok: false,
+      reason: error?.message || 'unable_to_resize',
+      serverPid: process.pid,
+      serverInstanceId,
+    };
+  }
 }
 
 function shutdownCodexCliTerminal() {
@@ -707,10 +902,13 @@ function attachCodexCliTerminal(server) {
 }
 
 module.exports = {
+  attachCodexCliEventStream,
   attachCodexCliTerminal,
   createCodexCliSession,
   createCodexCliTicket,
   getCodexCliSessions,
+  resizeCodexCliSession,
   shutdownCodexCliTerminal,
   terminateCodexCliSession,
+  writeCodexCliSessionInput,
 };

@@ -30,6 +30,21 @@ type TerminalSessionResponse = {
   serverInstanceId?: string;
 };
 
+type TerminalTransport = 'websocket' | 'sse';
+
+type TerminalServerMessage = {
+  type?: string;
+  data?: string;
+  pid?: number;
+  cwd?: string;
+  sessionId?: string;
+  mode?: TerminalMode;
+  serverPid?: number;
+  serverInstanceId?: string;
+  exitCode?: number;
+  signal?: number;
+};
+
 const atomOneLightTheme = {
   background: '#fafafa',
   foreground: '#383a42',
@@ -58,6 +73,7 @@ const terminalFont =
   '"JetBrainsMono Nerd Font Mono", "JetBrains Mono", "Symbols Nerd Font Mono", "Roboto Mono", "SFMono-Regular", "SF Mono", "Cascadia Code", Menlo, Consolas, "Liberation Mono", monospace';
 const terminalFontSize = 14;
 const terminalResponseSuppressMs = 1500;
+const httpInputFlushMs = 8;
 const terminalQueryResponsePattern =
   /^(?:\x1b\[[?>]?[0-9;]*[Rc]|\x1b\](?:10|11);rgb:[0-9a-fA-F]{1,4}\/[0-9a-fA-F]{1,4}\/[0-9a-fA-F]{1,4}(?:\x07|\x1b\\))+$/;
 const terminalWordSequences = {
@@ -100,6 +116,23 @@ function buildWebSocketUrl({
   url.searchParams.set('mode', mode);
   url.searchParams.set('cols', String(cols));
   url.searchParams.set('rows', String(rows));
+  return url.toString();
+}
+
+function buildEventSourceUrl({
+  ticket,
+  sessionId,
+  mode,
+}: {
+  ticket: string;
+  sessionId: string;
+  mode: TerminalMode;
+}) {
+  const base = apiBaseUrl();
+  const path = `${base}/api/codex-cli/sessions/${encodeURIComponent(sessionId)}/events`;
+  const url = new URL(path || `/api/codex-cli/sessions/${encodeURIComponent(sessionId)}/events`, window.location.origin);
+  url.searchParams.set('ticket', ticket);
+  url.searchParams.set('mode', mode);
   return url.toString();
 }
 
@@ -200,6 +233,11 @@ export default function CodexCliRoute() {
   const terminalRef = useRef<Terminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
   const socketRef = useRef<WebSocket | null>(null);
+  const eventSourceRef = useRef<EventSource | null>(null);
+  const transportRef = useRef<TerminalTransport | null>(null);
+  const activeSessionIdRef = useRef<string | null>(null);
+  const queuedInputRef = useRef('');
+  const inputFlushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const reconnectCounter = useRef(0);
   const lastSessionIdRef = useRef<string | null>(null);
   const pendingSessionCreateRef = useRef<TerminalMode | null>(null);
@@ -218,6 +256,64 @@ export default function CodexCliRoute() {
   }, [sessionId]);
 
   useEffect(() => {
+    activeSessionIdRef.current = activeSessionId;
+  }, [activeSessionId]);
+
+  const flushQueuedInput = useCallback(() => {
+    inputFlushTimerRef.current = null;
+    const data = queuedInputRef.current;
+    queuedInputRef.current = '';
+    const session = activeSessionIdRef.current;
+    if (!data || !session || hasExitedRef.current) {
+      return;
+    }
+    request
+      .post(`${apiBaseUrl()}/api/codex-cli/sessions/${encodeURIComponent(session)}/input`, {
+        data,
+      })
+      .catch(() => {
+        terminalRef.current?.writeln('\r\n[web terminal input failed]\r\n');
+      });
+  }, []);
+
+  const queueHttpInput = useCallback(
+    (data: string) => {
+      queuedInputRef.current += data;
+      if (inputFlushTimerRef.current) {
+        return;
+      }
+      inputFlushTimerRef.current = setTimeout(flushQueuedInput, httpInputFlushMs);
+    },
+    [flushQueuedInput],
+  );
+
+  const sendHttpResize = useCallback((cols: number, rows: number) => {
+    const session = activeSessionIdRef.current;
+    if (!session || hasExitedRef.current) {
+      return;
+    }
+    request
+      .post(`${apiBaseUrl()}/api/codex-cli/sessions/${encodeURIComponent(session)}/resize`, {
+        cols,
+        rows,
+      })
+      .catch(() => undefined);
+  }, []);
+
+  const closeTransports = useCallback(() => {
+    socketRef.current?.close();
+    socketRef.current = null;
+    eventSourceRef.current?.close();
+    eventSourceRef.current = null;
+    transportRef.current = null;
+    if (inputFlushTimerRef.current) {
+      clearTimeout(inputFlushTimerRef.current);
+      inputFlushTimerRef.current = null;
+    }
+    queuedInputRef.current = '';
+  }, []);
+
+  useEffect(() => {
     if (activeSessionId) {
       pendingSessionCreateRef.current = null;
       return;
@@ -229,8 +325,7 @@ export default function CodexCliRoute() {
     let cancelled = false;
     pendingSessionCreateRef.current = terminalMode;
     reconnectCounter.current += 1;
-    socketRef.current?.close();
-    socketRef.current = null;
+    closeTransports();
     hasExitedRef.current = false;
     setExitInfo(null);
 
@@ -257,7 +352,7 @@ export default function CodexCliRoute() {
     return () => {
       cancelled = true;
     };
-  }, [activeSessionId, isAuthenticated, navigate, routePrefix, terminalMode, token]);
+  }, [activeSessionId, closeTransports, isAuthenticated, navigate, routePrefix, terminalMode, token]);
 
   useEffect(() => {
     if (!activeSessionId) {
@@ -271,13 +366,12 @@ export default function CodexCliRoute() {
       return;
     }
     reconnectCounter.current += 1;
-    socketRef.current?.close();
-    socketRef.current = null;
+    closeTransports();
     lastSessionIdRef.current = terminalKey;
     hasExitedRef.current = false;
     setExitInfo(null);
     terminalRef.current?.reset();
-  }, [activeSessionId, terminalMode]);
+  }, [activeSessionId, closeTransports, terminalMode]);
 
   const fitAndNotify = useCallback(() => {
     const fitAddon = fitAddonRef.current;
@@ -291,7 +385,7 @@ export default function CodexCliRoute() {
       return;
     }
     const socket = socketRef.current;
-    if (socket?.readyState === WebSocket.OPEN) {
+    if (transportRef.current === 'websocket' && socket?.readyState === WebSocket.OPEN) {
       socket.send(
         JSON.stringify({
           type: 'resize',
@@ -299,8 +393,12 @@ export default function CodexCliRoute() {
           rows: terminal.rows,
         }),
       );
+      return;
     }
-  }, []);
+    if (transportRef.current === 'sse') {
+      sendHttpResize(terminal.cols, terminal.rows);
+    }
+  }, [sendHttpResize]);
 
   const connect = useCallback(async () => {
     if (!activeSessionId || !isAuthenticated || !token || !terminalRef.current) {
@@ -312,15 +410,117 @@ export default function CodexCliRoute() {
     hasExitedRef.current = false;
     setExitInfo(null);
 
-    socketRef.current?.close();
-    socketRef.current = null;
+    closeTransports();
 
-    let ticketResponse: TicketResponse;
-    try {
-      ticketResponse = await request.post(`${apiBaseUrl()}/api/codex-cli/ticket`, {
+    const handleTerminalMessage = (
+      message: TerminalServerMessage,
+      closeCurrentTransport: () => void,
+    ) => {
+      if (connectionId !== reconnectCounter.current) {
+        return;
+      }
+
+      if (message.type === 'data' || message.type === 'replay') {
+        terminal.write(message.data ?? '');
+        return;
+      }
+      if (message.type === 'ready') {
+        const gotDifferentSession = !!message.sessionId && message.sessionId !== activeSessionId;
+        const gotDifferentMode = !!message.mode && message.mode !== terminalMode;
+        if (gotDifferentSession || gotDifferentMode) {
+          hasExitedRef.current = true;
+          terminal.writeln(
+            [
+              '\r\n[web terminal] session identity mismatch; connection closed',
+              `expected ${terminalMode}:${activeSessionId}`,
+              `got ${message.mode ?? 'unknown'}:${message.sessionId ?? 'unknown'}`,
+              message.serverPid ? `server pid ${message.serverPid}` : null,
+              '\r\n',
+            ]
+              .filter(Boolean)
+              .join(' · '),
+          );
+          closeCurrentTransport();
+        }
+        return;
+      }
+      if (message.type === 'exit') {
+        hasExitedRef.current = true;
+        setExitInfo({
+          exitCode: message.exitCode,
+          signal: message.signal,
+        });
+        terminal.writeln('\r\n[terminal exited]\r\n');
+        closeCurrentTransport();
+      }
+    };
+
+    const requestTicket = () =>
+      request.post<TicketResponse>(`${apiBaseUrl()}/api/codex-cli/ticket`, {
         sessionId: activeSessionId,
         mode: terminalMode,
       });
+
+    const connectWithEventSource = async () => {
+      let sseTicketResponse: TicketResponse;
+      try {
+        sseTicketResponse = await requestTicket();
+      } catch {
+        terminalRef.current?.writeln('\r\n[web terminal] failed to open terminal session\r\n');
+        return;
+      }
+
+      if (connectionId !== reconnectCounter.current) {
+        return;
+      }
+
+      const url = buildEventSourceUrl({
+        ticket: sseTicketResponse.ticket,
+        sessionId: activeSessionId,
+        mode: terminalMode,
+      });
+      const eventSource = new EventSource(url);
+      eventSourceRef.current = eventSource;
+      transportRef.current = 'sse';
+
+      eventSource.addEventListener('open', () => {
+        if (connectionId !== reconnectCounter.current) {
+          eventSource.close();
+          return;
+        }
+        fitAndNotify();
+        terminal.focus();
+      });
+
+      eventSource.addEventListener('message', (event) => {
+        let message: TerminalServerMessage;
+        try {
+          message = JSON.parse(event.data);
+        } catch {
+          return;
+        }
+        if (eventSourceRef.current !== eventSource) {
+          return;
+        }
+        handleTerminalMessage(message, () => eventSource.close());
+      });
+
+      eventSource.addEventListener('error', () => {
+        if (
+          connectionId === reconnectCounter.current &&
+          eventSourceRef.current === eventSource &&
+          terminalRef.current &&
+          !hasExitedRef.current
+        ) {
+          terminalRef.current.writeln('\r\n[web terminal disconnected]\r\n');
+        }
+        eventSource.close();
+      });
+    };
+
+    let ticketResponse: TicketResponse;
+    try {
+      ticketResponse = await requestTicket();
     } catch {
       terminalRef.current?.writeln('\r\n[web terminal] failed to open terminal session\r\n');
       return;
@@ -341,6 +541,25 @@ export default function CodexCliRoute() {
     });
     const socket = new WebSocket(url);
     socketRef.current = socket;
+    transportRef.current = 'websocket';
+    let sawReady = false;
+    let fallbackStarted = false;
+    const startFallback = () => {
+      if (fallbackStarted || sawReady || hasExitedRef.current || connectionId !== reconnectCounter.current) {
+        return;
+      }
+      fallbackStarted = true;
+      if (socketRef.current === socket) {
+        socketRef.current = null;
+      }
+      transportRef.current = null;
+      try {
+        socket.close();
+      } catch {
+        // Ignore close races.
+      }
+      void connectWithEventSource();
+    };
 
     socket.addEventListener('open', () => {
       if (connectionId !== reconnectCounter.current) {
@@ -374,42 +593,17 @@ export default function CodexCliRoute() {
         return;
       }
 
-      if (message.type === 'data' || message.type === 'replay') {
-        terminal.write(message.data ?? '');
-        return;
-      }
       if (message.type === 'ready') {
-        const gotDifferentSession = !!message.sessionId && message.sessionId !== activeSessionId;
-        const gotDifferentMode = !!message.mode && message.mode !== terminalMode;
-        if (gotDifferentSession || gotDifferentMode) {
-          hasExitedRef.current = true;
-          terminal.writeln(
-            [
-              '\r\n[web terminal] session identity mismatch; connection closed',
-              `expected ${terminalMode}:${activeSessionId}`,
-              `got ${message.mode ?? 'unknown'}:${message.sessionId ?? 'unknown'}`,
-              message.serverPid ? `server pid ${message.serverPid}` : null,
-              '\r\n',
-            ]
-              .filter(Boolean)
-              .join(' · '),
-          );
-          socket.close();
-        }
-        return;
+        sawReady = true;
       }
-      if (message.type === 'exit') {
-        hasExitedRef.current = true;
-        setExitInfo({
-          exitCode: message.exitCode,
-          signal: message.signal,
-        });
-        terminal.writeln('\r\n[terminal exited]\r\n');
-        socket.close();
-      }
+      handleTerminalMessage(message, () => socket.close());
     });
 
     socket.addEventListener('close', () => {
+      if (!sawReady) {
+        startFallback();
+        return;
+      }
       if (
         connectionId === reconnectCounter.current &&
         terminalRef.current &&
@@ -420,11 +614,9 @@ export default function CodexCliRoute() {
     });
 
     socket.addEventListener('error', () => {
-      if (connectionId === reconnectCounter.current) {
-        terminalRef.current?.writeln('\r\n[web terminal connection error]\r\n');
-      }
+      startFallback();
     });
-  }, [activeSessionId, fitAndNotify, isAuthenticated, terminalMode, token]);
+  }, [activeSessionId, closeTransports, fitAndNotify, isAuthenticated, terminalMode, token]);
 
   const openFreshTerminal = useCallback(() => {
     navigate(`/${routePrefix}/new`);
@@ -464,8 +656,12 @@ export default function CodexCliRoute() {
         return;
       }
       const socket = socketRef.current;
-      if (socket?.readyState === WebSocket.OPEN) {
+      if (transportRef.current === 'websocket' && socket?.readyState === WebSocket.OPEN) {
         socket.send(JSON.stringify({ type: 'input', data }));
+        return;
+      }
+      if (transportRef.current === 'sse') {
+        queueHttpInput(data);
       }
     };
 
@@ -504,13 +700,12 @@ export default function CodexCliRoute() {
       resizeObserver.disconnect();
       dataDisposable.dispose();
       disposeClipboardHandlers();
-      socketRef.current?.close();
-      socketRef.current = null;
+      closeTransports();
       terminal.dispose();
       terminalRef.current = null;
       fitAddonRef.current = null;
     };
-  }, [fitAndNotify]);
+  }, [closeTransports, fitAndNotify, queueHttpInput]);
 
   useEffect(() => {
     connect();
