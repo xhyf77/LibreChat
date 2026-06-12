@@ -12,6 +12,7 @@ const DEFAULT_CODEX_HOME = '/home/xieminhui/fjj/.codex';
 const TICKET_TTL_MS = 30_000;
 const TERMINATED_SESSION_TTL_MS = 60_000;
 const MAX_REPLAY_BYTES = 1024 * 1024;
+const REPLAY_TRIM_TARGET_BYTES = Math.floor(MAX_REPLAY_BYTES * 0.75);
 const DEFAULT_REPLAY_SCROLLBACK_ROWS = 1500;
 const COMPACT_REPLAY_SCROLLBACK_ROWS = 300;
 const MAX_ATTACH_BACKLOG_BYTES = 1024 * 1024;
@@ -229,6 +230,7 @@ class CodexCliSession {
     this.mode = mode;
     this.repoPath = getRepoPath();
     this.buffer = '';
+    this.bufferBytes = 0;
     this.clients = new Set();
     this.eventClients = new Set();
     this.exited = false;
@@ -355,16 +357,21 @@ class CodexCliSession {
 
   appendBuffer(data) {
     this.buffer += data;
-    if (Buffer.byteLength(this.buffer, 'utf8') <= MAX_REPLAY_BYTES) {
+    this.bufferBytes += Buffer.byteLength(data, 'utf8');
+    if (this.bufferBytes <= MAX_REPLAY_BYTES) {
       return;
     }
-    let bytes = 0;
-    let start = this.buffer.length;
-    while (start > 0 && bytes < MAX_REPLAY_BYTES) {
-      start -= 1;
-      bytes += Buffer.byteLength(this.buffer[start], 'utf8');
+
+    const keepRatio = REPLAY_TRIM_TARGET_BYTES / this.bufferBytes;
+    let keepChars = Math.max(1, Math.floor(this.buffer.length * keepRatio));
+    this.buffer = this.buffer.slice(-keepChars);
+    this.bufferBytes = Buffer.byteLength(this.buffer, 'utf8');
+
+    while (this.bufferBytes > MAX_REPLAY_BYTES && keepChars > 1) {
+      keepChars = Math.max(1, Math.floor(keepChars * 0.75));
+      this.buffer = this.buffer.slice(-keepChars);
+      this.bufferBytes = Buffer.byteLength(this.buffer, 'utf8');
     }
-    this.buffer = this.buffer.slice(start);
   }
 
   queueHeadlessWrite(data) {
