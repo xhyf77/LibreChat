@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useLocation, useNavigate, useParams } from 'react-router-dom';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
+import { SerializeAddon } from '@xterm/addon-serialize';
 import { apiBaseUrl, request } from 'librechat-data-provider';
 import copyToClipboard from 'copy-to-clipboard';
 import { useAuthContext } from '~/hooks';
@@ -38,9 +39,16 @@ type HttpInputStream = {
   closed: boolean;
 };
 
+type TerminalSnapshot = {
+  key: string;
+  data: string;
+};
+
 type TerminalServerMessage = {
   type?: string;
   data?: string;
+  replayKind?: 'xterm-serialize' | 'raw-tail';
+  seq?: number;
   pid?: number;
   cwd?: string;
   sessionId?: string;
@@ -230,6 +238,19 @@ function isTerminalQueryResponse(data: string) {
   return terminalQueryResponsePattern.test(data);
 }
 
+function isTerminalViewportBlank(terminal: Terminal) {
+  const buffer = terminal.buffer.active;
+  const start = Math.max(0, buffer.baseY);
+  const end = Math.min(buffer.length, buffer.baseY + terminal.rows);
+  for (let index = start; index < end; index += 1) {
+    const line = buffer.getLine(index);
+    if (line?.translateToString(true).trim()) {
+      return false;
+    }
+  }
+  return true;
+}
+
 export default function CodexCliRoute() {
   const { sessionId } = useParams();
   const location = useLocation();
@@ -238,6 +259,7 @@ export default function CodexCliRoute() {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const terminalRef = useRef<Terminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
+  const serializeAddonRef = useRef<SerializeAddon | null>(null);
   const socketRef = useRef<WebSocket | null>(null);
   const eventSourceRef = useRef<EventSource | null>(null);
   const transportRef = useRef<TerminalTransport | null>(null);
@@ -246,11 +268,17 @@ export default function CodexCliRoute() {
   const inputStreamDisabledRef = useRef(false);
   const queuedInputRef = useRef('');
   const inputFlushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const reconnectCounter = useRef(0);
   const lastSessionIdRef = useRef<string | null>(null);
   const pendingSessionCreateRef = useRef<TerminalMode | null>(null);
+  const connectedRef = useRef(false);
+  const reconnectOnVisibleRef = useRef(false);
+  const resetBeforeReplayRef = useRef(false);
+  const terminalSnapshotRef = useRef<TerminalSnapshot | null>(null);
   const suppressTerminalResponsesUntilRef = useRef(0);
   const hasExitedRef = useRef(false);
+  const [reconnectNonce, setReconnectNonce] = useState(0);
   const [exitInfo, setExitInfo] = useState<TerminalExitInfo | null>(null);
 
   const terminalMode: TerminalMode = location.pathname.startsWith('/codex') ? 'codex' : 'shell';
@@ -280,6 +308,58 @@ export default function CodexCliRoute() {
       // The browser may already have closed or errored the request body.
     }
   }, []);
+
+  const getTerminalSnapshotKey = useCallback(() => {
+    const session = activeSessionIdRef.current;
+    if (!session) {
+      return null;
+    }
+    return `${terminalMode}:${session}`;
+  }, [terminalMode]);
+
+  const snapshotTerminalState = useCallback(() => {
+    const terminal = terminalRef.current;
+    const serializeAddon = serializeAddonRef.current;
+    const key = getTerminalSnapshotKey();
+    if (!terminal || !serializeAddon || !key) {
+      return;
+    }
+    try {
+      const data = serializeAddon.serialize({ scrollback: 50000 });
+      if (!data) {
+        return;
+      }
+      terminalSnapshotRef.current = {
+        key,
+        data,
+      };
+    } catch {
+      // Snapshotting is a recovery aid; live PTY streaming remains authoritative.
+    }
+  }, [getTerminalSnapshotKey]);
+
+  const restoreTerminalSnapshotIfBlank = useCallback(() => {
+    const terminal = terminalRef.current;
+    const snapshot = terminalSnapshotRef.current;
+    const key = getTerminalSnapshotKey();
+    if (
+      !terminal ||
+      !snapshot ||
+      !key ||
+      snapshot.key !== key ||
+      !isTerminalViewportBlank(terminal)
+    ) {
+      return false;
+    }
+    try {
+      terminal.reset();
+      terminal.write(snapshot.data);
+      terminal.refresh(0, Math.max(0, terminal.rows - 1));
+      return true;
+    } catch {
+      return false;
+    }
+  }, [getTerminalSnapshotKey]);
 
   const startHttpInputStream = useCallback(() => {
     const session = activeSessionIdRef.current;
@@ -357,6 +437,28 @@ export default function CodexCliRoute() {
         }
       });
   }, [token]);
+
+  const isTransportUsable = useCallback(() => {
+    if (transportRef.current === 'websocket') {
+      const socket = socketRef.current;
+      return connectedRef.current && !!socket && socket.readyState === WebSocket.OPEN;
+    }
+    if (transportRef.current === 'sse') {
+      const eventSource = eventSourceRef.current;
+      return connectedRef.current && !!eventSource && eventSource.readyState === 1;
+    }
+    return false;
+  }, []);
+
+  const requestReconnect = useCallback(() => {
+    if (hasExitedRef.current || reconnectTimerRef.current) {
+      return;
+    }
+    reconnectTimerRef.current = setTimeout(() => {
+      reconnectTimerRef.current = null;
+      setReconnectNonce((value) => value + 1);
+    }, 150);
+  }, []);
 
   const postTerminalJson = useCallback(
     async (path: string, body: Record<string, unknown>) => {
@@ -438,10 +540,16 @@ export default function CodexCliRoute() {
     eventSourceRef.current = null;
     closeInputStream();
     transportRef.current = null;
+    connectedRef.current = false;
+    reconnectOnVisibleRef.current = false;
     inputStreamDisabledRef.current = false;
     if (inputFlushTimerRef.current) {
       clearTimeout(inputFlushTimerRef.current);
       inputFlushTimerRef.current = null;
+    }
+    if (reconnectTimerRef.current) {
+      clearTimeout(reconnectTimerRef.current);
+      reconnectTimerRef.current = null;
     }
     queuedInputRef.current = '';
   }, [closeInputStream]);
@@ -540,10 +648,12 @@ export default function CodexCliRoute() {
 
     reconnectCounter.current += 1;
     const connectionId = reconnectCounter.current;
+    const shouldResetBeforeReplay = resetBeforeReplayRef.current;
     hasExitedRef.current = false;
     setExitInfo(null);
 
     closeTransports();
+    resetBeforeReplayRef.current = shouldResetBeforeReplay;
 
     const handleTerminalMessage = (
       message: TerminalServerMessage,
@@ -553,7 +663,20 @@ export default function CodexCliRoute() {
         return;
       }
 
-      if (message.type === 'data' || message.type === 'replay') {
+      if (message.type === 'replay') {
+        terminal.reset();
+        resetBeforeReplayRef.current = false;
+        terminal.write(message.data ?? '', () => {
+          fitAndNotify();
+          terminal.refresh(0, Math.max(0, terminal.rows - 1));
+        });
+        return;
+      }
+      if (message.type === 'data') {
+        if (resetBeforeReplayRef.current) {
+          terminal.reset();
+          resetBeforeReplayRef.current = false;
+        }
         terminal.write(message.data ?? '');
         return;
       }
@@ -562,6 +685,7 @@ export default function CodexCliRoute() {
         const gotDifferentMode = !!message.mode && message.mode !== terminalMode;
         if (gotDifferentSession || gotDifferentMode) {
           hasExitedRef.current = true;
+          connectedRef.current = false;
           terminal.writeln(
             [
               '\r\n[web terminal] session identity mismatch; connection closed',
@@ -574,11 +698,15 @@ export default function CodexCliRoute() {
               .join(' · '),
           );
           closeCurrentTransport();
+          return;
         }
+        connectedRef.current = true;
+        reconnectOnVisibleRef.current = false;
         return;
       }
       if (message.type === 'exit') {
         hasExitedRef.current = true;
+        connectedRef.current = false;
         setExitInfo({
           exitCode: message.exitCode,
           signal: message.signal,
@@ -615,6 +743,8 @@ export default function CodexCliRoute() {
       const eventSource = new EventSource(url);
       eventSourceRef.current = eventSource;
       transportRef.current = 'sse';
+      connectedRef.current = false;
+      let sseSawReady = false;
 
       eventSource.addEventListener('open', () => {
         if (connectionId !== reconnectCounter.current) {
@@ -636,6 +766,9 @@ export default function CodexCliRoute() {
         if (eventSourceRef.current !== eventSource) {
           return;
         }
+        if (message.type === 'ready') {
+          sseSawReady = true;
+        }
         handleTerminalMessage(message, () => {
           eventSource.close();
           closeInputStream();
@@ -650,6 +783,19 @@ export default function CodexCliRoute() {
           !hasExitedRef.current
         ) {
           terminalRef.current.writeln('\r\n[web terminal disconnected]\r\n');
+        }
+        if (connectionId === reconnectCounter.current && eventSourceRef.current === eventSource) {
+          eventSourceRef.current = null;
+          transportRef.current = null;
+          connectedRef.current = false;
+          if (!hasExitedRef.current && sseSawReady) {
+            resetBeforeReplayRef.current = true;
+            if (typeof document !== 'undefined' && document.hidden) {
+              reconnectOnVisibleRef.current = true;
+            } else {
+              requestReconnect();
+            }
+          }
         }
         eventSource.close();
         closeInputStream();
@@ -680,6 +826,7 @@ export default function CodexCliRoute() {
     const socket = new WebSocket(url);
     socketRef.current = socket;
     transportRef.current = 'websocket';
+    connectedRef.current = false;
     let sawReady = false;
     let fallbackStarted = false;
     const startFallback = () => {
@@ -742,6 +889,19 @@ export default function CodexCliRoute() {
         startFallback();
         return;
       }
+      if (connectionId === reconnectCounter.current && socketRef.current === socket) {
+        socketRef.current = null;
+        transportRef.current = null;
+        connectedRef.current = false;
+        if (!hasExitedRef.current) {
+          resetBeforeReplayRef.current = true;
+          if (typeof document !== 'undefined' && document.hidden) {
+            reconnectOnVisibleRef.current = true;
+          } else {
+            requestReconnect();
+          }
+        }
+      }
       if (
         connectionId === reconnectCounter.current &&
         terminalRef.current &&
@@ -760,6 +920,7 @@ export default function CodexCliRoute() {
     closeTransports,
     fitAndNotify,
     isAuthenticated,
+    requestReconnect,
     startHttpInputStream,
     terminalMode,
     token,
@@ -790,10 +951,13 @@ export default function CodexCliRoute() {
       windowsMode: false,
     });
     const fitAddon = new FitAddon();
+    const serializeAddon = new SerializeAddon();
     terminal.loadAddon(fitAddon);
+    terminal.loadAddon(serializeAddon);
     terminal.open(container);
     terminalRef.current = terminal;
     fitAddonRef.current = fitAddon;
+    serializeAddonRef.current = serializeAddon;
     fitAndNotify();
     terminal.focus();
 
@@ -851,12 +1015,74 @@ export default function CodexCliRoute() {
       terminal.dispose();
       terminalRef.current = null;
       fitAddonRef.current = null;
+      serializeAddonRef.current = null;
     };
   }, [closeTransports, fitAndNotify, queueHttpInput]);
 
   useEffect(() => {
     connect();
-  }, [connect]);
+  }, [connect, reconnectNonce]);
+
+  useEffect(() => {
+    const restoreTerminal = () => {
+      if (typeof document !== 'undefined' && document.hidden) {
+        return;
+      }
+
+      const terminal = terminalRef.current;
+      if (!terminal) {
+        return;
+      }
+
+      window.requestAnimationFrame(() => {
+        window.requestAnimationFrame(() => {
+          fitAndNotify();
+          terminal.refresh(0, Math.max(0, terminal.rows - 1));
+          restoreTerminalSnapshotIfBlank();
+          terminal.focus();
+
+          if (transportRef.current === 'sse') {
+            startHttpInputStream();
+          }
+
+          if (
+            activeSessionIdRef.current &&
+            !hasExitedRef.current &&
+            (reconnectOnVisibleRef.current || !isTransportUsable())
+          ) {
+            reconnectOnVisibleRef.current = false;
+            resetBeforeReplayRef.current = true;
+            requestReconnect();
+          }
+        });
+      });
+    };
+
+    const handleVisibilityChange = () => {
+      if (document.hidden) {
+        snapshotTerminalState();
+        return;
+      }
+      restoreTerminal();
+    };
+
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    window.addEventListener('focus', restoreTerminal);
+    window.addEventListener('pageshow', restoreTerminal);
+
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      window.removeEventListener('focus', restoreTerminal);
+      window.removeEventListener('pageshow', restoreTerminal);
+    };
+  }, [
+    fitAndNotify,
+    isTransportUsable,
+    requestReconnect,
+    restoreTerminalSnapshotIfBlank,
+    snapshotTerminalState,
+    startHttpInputStream,
+  ]);
 
   return (
     <main className="codex-cli-page flex h-full min-h-0 flex-col">

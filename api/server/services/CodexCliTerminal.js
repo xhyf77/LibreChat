@@ -3,6 +3,8 @@ const path = require('path');
 const { StringDecoder } = require('string_decoder');
 const { WebSocketServer } = require('ws');
 const pty = require('node-pty');
+const { Terminal: HeadlessTerminal } = require('@xterm/headless');
+const { SerializeAddon } = require('@xterm/addon-serialize');
 const { logger } = require('@librechat/data-schemas');
 
 const DEFAULT_REPO_PATH = '/home/xieminhui/fjj/hm_os/hm-verif-kernel';
@@ -10,6 +12,8 @@ const DEFAULT_CODEX_HOME = '/home/xieminhui/fjj/.codex';
 const TICKET_TTL_MS = 30_000;
 const TERMINATED_SESSION_TTL_MS = 60_000;
 const MAX_REPLAY_BYTES = 2 * 1024 * 1024;
+const DEFAULT_REPLAY_SCROLLBACK_ROWS = 10000;
+const MAX_ATTACH_BACKLOG_BYTES = 2 * 1024 * 1024;
 const HEARTBEAT_INTERVAL_MS = 30_000;
 const SSE_HEARTBEAT_INTERVAL_MS = 15_000;
 
@@ -181,6 +185,15 @@ function clampTerminalSize(value, fallback, min, max) {
   return Math.max(min, Math.min(max, parsed));
 }
 
+function getReplayScrollbackRows() {
+  return clampTerminalSize(
+    process.env.CODEX_CLI_REPLAY_SCROLLBACK_ROWS,
+    DEFAULT_REPLAY_SCROLLBACK_ROWS,
+    100,
+    50000,
+  );
+}
+
 function formatLogFields(fields) {
   return Object.entries(fields)
     .filter(([, value]) => value !== undefined && value !== null)
@@ -217,6 +230,17 @@ class CodexCliSession {
     this.exited = false;
     this.processExited = false;
     this.exitInfo = null;
+    this.replaySeq = 0;
+    this.headlessWriteChain = Promise.resolve();
+    this.headlessWriteFailed = false;
+    this.headlessTerminal = new HeadlessTerminal({
+      allowProposedApi: true,
+      cols,
+      rows,
+      scrollback: getReplayScrollbackRows(),
+    });
+    this.serializeAddon = new SerializeAddon();
+    this.headlessTerminal.loadAddon(this.serializeAddon);
 
     const env = {
       ...process.env,
@@ -240,6 +264,7 @@ class CodexCliSession {
 
     this.ptyProcess.onData((data) => {
       this.appendBuffer(data);
+      this.queueHeadlessWrite(data);
       this.broadcast({ type: 'data', data });
     });
 
@@ -295,7 +320,120 @@ class CodexCliSession {
     this.buffer = this.buffer.slice(start);
   }
 
+  queueHeadlessWrite(data) {
+    this.replaySeq += 1;
+    if (!this.headlessTerminal || this.headlessWriteFailed) {
+      return;
+    }
+    this.headlessWriteChain = this.headlessWriteChain
+      .then(
+        () =>
+          new Promise((resolve) => {
+            try {
+              this.headlessTerminal.write(data, resolve);
+            } catch (error) {
+              this.headlessWriteFailed = true;
+              logger.warn('[CodexCliTerminal] Headless terminal write failed', {
+                sessionId: this.sessionId,
+                error: error?.message ?? error,
+              });
+              resolve();
+            }
+          }),
+      )
+      .catch((error) => {
+        this.headlessWriteFailed = true;
+        logger.warn('[CodexCliTerminal] Headless terminal write chain failed', {
+          sessionId: this.sessionId,
+          error: error?.message ?? error,
+        });
+      });
+  }
+
+  async createReplayMessage() {
+    const seq = this.replaySeq;
+    if (!this.headlessTerminal || !this.serializeAddon || this.headlessWriteFailed) {
+      return { type: 'replay', data: this.buffer, seq, replayKind: 'raw-tail' };
+    }
+    try {
+      await this.headlessWriteChain;
+      return {
+        type: 'replay',
+        data: this.serializeAddon.serialize({ scrollback: getReplayScrollbackRows() }),
+        seq,
+        replayKind: 'xterm-serialize',
+        cols: this.headlessTerminal.cols,
+        rows: this.headlessTerminal.rows,
+      };
+    } catch (error) {
+      this.headlessWriteFailed = true;
+      logger.warn('[CodexCliTerminal] Headless terminal serialize failed', {
+        sessionId: this.sessionId,
+        error: error?.message ?? error,
+      });
+      return { type: 'replay', data: this.buffer, seq, replayKind: 'raw-tail' };
+    }
+  }
+
+  startReplay(client, send, close) {
+    client.replaying = true;
+    client.replayBacklog = [];
+    client.replayBacklogBytes = 0;
+    void this.createReplayMessage()
+      .then((message) => {
+        if (client.closed) {
+          return;
+        }
+        send(message);
+        client.replaying = false;
+        const backlog = client.replayBacklog || [];
+        client.replayBacklog = [];
+        client.replayBacklogBytes = 0;
+        for (const data of backlog) {
+          if (client.closed) {
+            return;
+          }
+          send({ type: 'data', data });
+        }
+        if (this.exited && this.exitInfo && !client.closed) {
+          send({ type: 'exit', ...this.exitInfo });
+          close();
+        }
+      })
+      .catch((error) => {
+        logger.warn('[CodexCliTerminal] Replay delivery failed', {
+          sessionId: this.sessionId,
+          error: error?.message ?? error,
+        });
+        if (!client.closed) {
+          client.replaying = false;
+          send({ type: 'replay', data: this.buffer, seq: this.replaySeq, replayKind: 'raw-tail' });
+        }
+      });
+  }
+
+  sendOrBufferClient(client, send, message) {
+    if (client.replaying && message.type === 'data') {
+      const data = message.data ?? '';
+      client.replayBacklog.push(data);
+      client.replayBacklogBytes += Buffer.byteLength(data, 'utf8');
+      if (client.replayBacklogBytes > MAX_ATTACH_BACKLOG_BYTES) {
+        client.replayBacklog = [data];
+        client.replayBacklogBytes = Buffer.byteLength(data, 'utf8');
+      }
+      return;
+    }
+    send(message);
+  }
+
   attach(ws) {
+    const client = {
+      closed: false,
+      replaying: false,
+      replayBacklog: [],
+      replayBacklogBytes: 0,
+    };
+    ws.codexReplayClient = client;
     this.clients.add(ws);
     wsSend(ws, {
       type: 'ready',
@@ -306,19 +444,23 @@ class CodexCliSession {
       serverPid: process.pid,
       serverInstanceId,
     });
-    if (this.buffer) {
-      wsSend(ws, { type: 'replay', data: this.buffer });
-    }
-    if (this.exited && this.exitInfo) {
-      wsSend(ws, { type: 'exit', ...this.exitInfo });
-    }
+    this.startReplay(
+      client,
+      (message) => wsSend(ws, message),
+      () => ws.close(1000, 'Terminal session ended'),
+    );
   }
 
   attachEventStream(res) {
     const client = {
       res,
       heartbeatTimer: null,
+      closed: false,
+      replaying: false,
+      replayBacklog: [],
+      replayBacklogBytes: 0,
       close: () => {
+        client.closed = true;
         clearInterval(client.heartbeatTimer);
         this.eventClients.delete(client);
         if (!res.destroyed) {
@@ -351,27 +493,28 @@ class CodexCliSession {
       serverPid: process.pid,
       serverInstanceId,
     });
-    if (this.buffer) {
-      client.send({ type: 'replay', data: this.buffer });
-    }
-    if (this.exited && this.exitInfo) {
-      client.send({ type: 'exit', ...this.exitInfo });
-      client.close();
-    }
+    this.startReplay(client, (message) => client.send(message), () => client.close());
 
     return client;
   }
 
   detach(ws) {
+    if (ws.codexReplayClient) {
+      ws.codexReplayClient.closed = true;
+    }
     this.clients.delete(ws);
   }
 
   broadcast(message) {
     for (const client of this.clients) {
-      wsSend(client, message);
+      this.sendOrBufferClient(
+        client.codexReplayClient || {},
+        (payload) => wsSend(client, payload),
+        message,
+      );
     }
     for (const client of this.eventClients) {
-      client.send(message);
+      this.sendOrBufferClient(client, (payload) => client.send(payload), message);
     }
   }
 
@@ -384,6 +527,9 @@ class CodexCliSession {
     sessions.delete(getSessionKey(this.userId, this.sessionId));
     this.broadcast({ type: 'exit', ...exitInfo });
     for (const client of this.clients) {
+      if (client.codexReplayClient) {
+        client.codexReplayClient.closed = true;
+      }
       try {
         client.close(1000, 'Terminal session ended');
       } catch {
@@ -404,6 +550,8 @@ class CodexCliSession {
       ...exitInfo,
     };
     logger.info(`[CodexCliTerminal] PTY exited ${formatLogFields(exitLog)}`, exitLog);
+    this.serializeAddon?.dispose?.();
+    this.headlessTerminal?.dispose?.();
     return true;
   }
 
@@ -420,6 +568,7 @@ class CodexCliSession {
     }
     try {
       this.ptyProcess.resize(cols, rows);
+      this.headlessTerminal?.resize(cols, rows);
     } catch (error) {
       logger.warn('[CodexCliTerminal] PTY resize failed', {
         sessionId: this.sessionId,
