@@ -60,6 +60,11 @@ const terminalFontSize = 14;
 const terminalResponseSuppressMs = 1500;
 const terminalQueryResponsePattern =
   /^(?:\x1b\[[?>]?[0-9;]*[Rc]|\x1b\](?:10|11);rgb:[0-9a-fA-F]{1,4}\/[0-9a-fA-F]{1,4}\/[0-9a-fA-F]{1,4}(?:\x07|\x1b\\))+$/;
+const terminalWordSequences = {
+  backward: '\x1b[1;5D',
+  forward: '\x1b[1;5C',
+  deleteBackward: '\x17',
+};
 
 function loadTerminalFonts(fontSize: number) {
   if (typeof document === 'undefined' || !document.fonts) {
@@ -110,8 +115,40 @@ function isTerminalShortcut(event: KeyboardEvent, key: string) {
   );
 }
 
-function installClipboardHandlers(terminal: Terminal, container: HTMLDivElement) {
+function getTerminalWordSequence(event: KeyboardEvent) {
+  if (!event.ctrlKey || event.altKey || event.metaKey || event.shiftKey) {
+    return null;
+  }
+
+  if (event.key === 'Backspace' || event.code === 'Backspace') {
+    return terminalWordSequences.deleteBackward;
+  }
+  if (event.key === 'ArrowLeft' || event.key === 'Left' || event.code === 'ArrowLeft') {
+    return terminalWordSequences.backward;
+  }
+  if (event.key === 'ArrowRight' || event.key === 'Right' || event.code === 'ArrowRight') {
+    return terminalWordSequences.forward;
+  }
+
+  return null;
+}
+
+function installClipboardHandlers(
+  terminal: Terminal,
+  container: HTMLDivElement,
+  writeInput: (data: string) => void,
+) {
   terminal.attachCustomKeyEventHandler((event) => {
+    const wordSequence = getTerminalWordSequence(event);
+    if (wordSequence) {
+      if (event.type === 'keydown') {
+        event.preventDefault();
+        event.stopPropagation();
+        writeInput(wordSequence);
+      }
+      return false;
+    }
+
     if (isTerminalShortcut(event, 'c')) {
       const selection = terminal.getSelection();
       if (!selection) {
@@ -422,7 +459,17 @@ export default function CodexCliRoute() {
     terminal.focus();
 
     let disposed = false;
-    const disposeClipboardHandlers = installClipboardHandlers(terminal, container);
+    const writeInput = (data: string) => {
+      if (hasExitedRef.current) {
+        return;
+      }
+      const socket = socketRef.current;
+      if (socket?.readyState === WebSocket.OPEN) {
+        socket.send(JSON.stringify({ type: 'input', data }));
+      }
+    };
+
+    const disposeClipboardHandlers = installClipboardHandlers(terminal, container, writeInput);
     void loadTerminalFonts(terminalFontSize).then(() => {
       if (disposed) {
         return;
@@ -443,10 +490,7 @@ export default function CodexCliRoute() {
       ) {
         return;
       }
-      const socket = socketRef.current;
-      if (socket?.readyState === WebSocket.OPEN) {
-        socket.send(JSON.stringify({ type: 'input', data }));
-      }
+      writeInput(data);
     });
 
     const resizeObserver = new ResizeObserver(() => {
