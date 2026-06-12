@@ -67,6 +67,28 @@ type TerminalServerMessage = {
   signal?: number;
 };
 
+type TerminalDebugMetrics = {
+  reconnects: number;
+  sseMessages: number;
+  sseErrors: number;
+  wsMessages: number;
+  inputEvents: number;
+  inputChars: number;
+  outputMessages: number;
+  outputChars: number;
+  httpStreamChars: number;
+  httpPostChars: number;
+  wsInputChars: number;
+  terminalWriteOverflows: number;
+  maxTerminalWritePendingChars: number;
+  lastInputAt: number;
+  lastEchoMs: number | null;
+  lastSseMessageAt: number;
+  lastSseGapMs: number | null;
+  maxSseGapMs: number;
+  lastReconnectAt: number;
+};
+
 const atomOneLightTheme = {
   background: '#fafafa',
   foreground: '#202227',
@@ -124,6 +146,56 @@ const terminalWordSequences = {
   forward: '\x1b[1;5C',
   deleteBackward: '\x17',
 };
+const terminalDebugStorageKey = 'ruc-terminal-debug';
+const terminalDebugRefreshMs = 1000;
+
+function createTerminalDebugMetrics(): TerminalDebugMetrics {
+  return {
+    reconnects: 0,
+    sseMessages: 0,
+    sseErrors: 0,
+    wsMessages: 0,
+    inputEvents: 0,
+    inputChars: 0,
+    outputMessages: 0,
+    outputChars: 0,
+    httpStreamChars: 0,
+    httpPostChars: 0,
+    wsInputChars: 0,
+    terminalWriteOverflows: 0,
+    maxTerminalWritePendingChars: 0,
+    lastInputAt: 0,
+    lastEchoMs: null,
+    lastSseMessageAt: 0,
+    lastSseGapMs: null,
+    maxSseGapMs: 0,
+    lastReconnectAt: 0,
+  };
+}
+
+function isTerminalDebugEnabled(search: string) {
+  if (typeof window === 'undefined') {
+    return false;
+  }
+  const query = new URLSearchParams(search);
+  const value = query.get('terminalDebug');
+  if (value === '1' || value === 'true') {
+    window.localStorage.setItem(terminalDebugStorageKey, '1');
+    return true;
+  }
+  if (value === '0' || value === 'false') {
+    window.localStorage.removeItem(terminalDebugStorageKey);
+    return false;
+  }
+  return window.localStorage.getItem(terminalDebugStorageKey) === '1';
+}
+
+function formatMs(value: number | null) {
+  if (value == null) {
+    return '-';
+  }
+  return `${Math.round(value)}ms`;
+}
 
 function loadTerminalFonts(fontSize: number) {
   if (typeof document === 'undefined' || !document.fonts) {
@@ -372,10 +444,16 @@ export default function CodexCliRoute() {
 
   const terminalMode: TerminalMode = location.pathname.startsWith('/codex') ? 'codex' : 'shell';
   const routePrefix = terminalMode === 'codex' ? 'codex' : 'terminal';
+  const terminalDebugEnabled = useMemo(
+    () => isTerminalDebugEnabled(location.search),
+    [location.search],
+  );
   const transportPreference = useMemo(
     () => getTerminalTransportPreference(location.search),
     [location.search],
   );
+  const terminalDebugMetricsRef = useRef<TerminalDebugMetrics>(createTerminalDebugMetrics());
+  const [terminalDebugSnapshot, setTerminalDebugSnapshot] = useState('');
 
   const activeSessionId = useMemo(() => {
     if (isValidSessionId(sessionId)) {
@@ -387,6 +465,39 @@ export default function CodexCliRoute() {
   useEffect(() => {
     activeSessionIdRef.current = activeSessionId;
   }, [activeSessionId]);
+
+  useEffect(() => {
+    if (!terminalDebugEnabled) {
+      setTerminalDebugSnapshot('');
+      return;
+    }
+
+    const updateDebugSnapshot = () => {
+      const metrics = terminalDebugMetricsRef.current;
+      setTerminalDebugSnapshot(
+        [
+          `transport pref: ${transportPreference}`,
+          `live transport: ${transportRef.current ?? '-'}`,
+          `connected: ${connectedRef.current ? 'yes' : 'no'}`,
+          `session: ${activeSessionIdRef.current ?? '-'}`,
+          `reconnects: ${metrics.reconnects}`,
+          `echo latency: ${formatMs(metrics.lastEchoMs)}`,
+          `sse gap: ${formatMs(metrics.lastSseGapMs)} / max ${formatMs(metrics.maxSseGapMs)}`,
+          `input events/chars: ${metrics.inputEvents}/${metrics.inputChars}`,
+          `output msgs/chars: ${metrics.outputMessages}/${metrics.outputChars}`,
+          `sse/ws msgs: ${metrics.sseMessages}/${metrics.wsMessages}`,
+          `http stream/post chars: ${metrics.httpStreamChars}/${metrics.httpPostChars}`,
+          `ws input chars: ${metrics.wsInputChars}`,
+          `xterm pending max: ${metrics.maxTerminalWritePendingChars}`,
+          `xterm overflows: ${metrics.terminalWriteOverflows}`,
+        ].join('\n'),
+      );
+    };
+
+    updateDebugSnapshot();
+    const timer = window.setInterval(updateDebugSnapshot, terminalDebugRefreshMs);
+    return () => window.clearInterval(timer);
+  }, [terminalDebugEnabled, transportPreference]);
 
   const closeInputStream = useCallback(() => {
     const stream = inputStreamRef.current;
@@ -428,7 +539,12 @@ export default function CodexCliRoute() {
 
     if (terminalWriteInFlightRef.current) {
       terminalWritePendingRef.current += data;
+      terminalDebugMetricsRef.current.maxTerminalWritePendingChars = Math.max(
+        terminalDebugMetricsRef.current.maxTerminalWritePendingChars,
+        terminalWritePendingRef.current.length,
+      );
       if (terminalWritePendingRef.current.length > terminalWritePendingMaxChars) {
+        terminalDebugMetricsRef.current.terminalWriteOverflows += 1;
         terminalWritePendingRef.current = '';
         resetBeforeReplayRef.current = true;
         requestReconnectRef.current();
@@ -726,6 +842,8 @@ export default function CodexCliRoute() {
     }
     const attempt = reconnectAttemptRef.current;
     reconnectAttemptRef.current = Math.min(attempt + 1, 8);
+    terminalDebugMetricsRef.current.reconnects += 1;
+    terminalDebugMetricsRef.current.lastReconnectAt = performance.now();
     const delay = Math.min(reconnectMaxDelayMs, reconnectMinDelayMs * 2 ** Math.min(attempt, 5));
     reconnectTimerRef.current = setTimeout(() => {
       reconnectTimerRef.current = null;
@@ -816,6 +934,7 @@ export default function CodexCliRoute() {
         queueReconnectInput(data);
         markInputTransportStale();
       });
+    terminalDebugMetricsRef.current.httpPostChars += data.length;
   }, [markInputTransportStale, postTerminalJson, queueReconnectInput]);
 
   const queueHttpInput = useCallback(
@@ -828,6 +947,7 @@ export default function CodexCliRoute() {
       if (inputStream && !inputStream.closed) {
         try {
           inputStream.controller.enqueue(inputStream.encoder.encode(data));
+          terminalDebugMetricsRef.current.httpStreamChars += data.length;
           return;
         } catch {
           inputStream.closed = true;
@@ -1047,13 +1167,22 @@ export default function CodexCliRoute() {
         return;
       }
       if (message.type === 'data') {
+        const now = performance.now();
+        const data = message.data ?? '';
+        const metrics = terminalDebugMetricsRef.current;
+        metrics.outputMessages += 1;
+        metrics.outputChars += data.length;
+        if (metrics.lastInputAt && now - metrics.lastInputAt < 5000) {
+          metrics.lastEchoMs = now - metrics.lastInputAt;
+          metrics.lastInputAt = 0;
+        }
         if (resetBeforeReplayRef.current) {
           clearQueuedTerminalOutput();
           resetTerminalWriteQueue();
           terminal.reset();
           resetBeforeReplayRef.current = false;
         }
-        queueTerminalOutput(message.data ?? '');
+        queueTerminalOutput(data);
         return;
       }
       if (message.type === 'ready') {
@@ -1147,6 +1276,14 @@ export default function CodexCliRoute() {
       });
 
       eventSource.addEventListener('message', (event) => {
+        const now = performance.now();
+        const metrics = terminalDebugMetricsRef.current;
+        metrics.sseMessages += 1;
+        if (metrics.lastSseMessageAt) {
+          metrics.lastSseGapMs = now - metrics.lastSseMessageAt;
+          metrics.maxSseGapMs = Math.max(metrics.maxSseGapMs, metrics.lastSseGapMs);
+        }
+        metrics.lastSseMessageAt = now;
         let message: TerminalServerMessage;
         try {
           message = JSON.parse(event.data);
@@ -1166,6 +1303,7 @@ export default function CodexCliRoute() {
       });
 
       eventSource.addEventListener('error', () => {
+        terminalDebugMetricsRef.current.sseErrors += 1;
         if (
           connectionId === reconnectCounter.current &&
           eventSourceRef.current === eventSource &&
@@ -1270,6 +1408,7 @@ export default function CodexCliRoute() {
     });
 
     socket.addEventListener('message', (event) => {
+      terminalDebugMetricsRef.current.wsMessages += 1;
       let message: {
         type?: string;
         data?: string;
@@ -1415,6 +1554,7 @@ export default function CodexCliRoute() {
       if (transportRef.current === 'websocket' && socket?.readyState === WebSocket.OPEN) {
         try {
           socket.send(JSON.stringify({ type: 'input', data }));
+          terminalDebugMetricsRef.current.wsInputChars += data.length;
         } catch {
           queueReconnectInput(data);
           markInputTransportStale();
@@ -1445,6 +1585,10 @@ export default function CodexCliRoute() {
       if (hasExitedRef.current) {
         return;
       }
+      const metrics = terminalDebugMetricsRef.current;
+      metrics.inputEvents += 1;
+      metrics.inputChars += data.length;
+      metrics.lastInputAt = performance.now();
       if (data === '\x03') {
         suppressTerminalResponsesUntilRef.current = Date.now() + terminalResponseSuppressMs;
       } else if (
@@ -1602,6 +1746,11 @@ export default function CodexCliRoute() {
       <section className="min-h-0 flex-1 overflow-hidden" onClick={() => terminalRef.current?.focus()}>
         <div ref={containerRef} className="codex-cli-terminal h-full w-full" />
       </section>
+      {terminalDebugEnabled && terminalDebugSnapshot && (
+        <pre className="pointer-events-none fixed right-3 top-3 z-50 max-w-[min(420px,calc(100vw-24px))] whitespace-pre-wrap rounded-md border border-[#d9d9dc] bg-[rgba(250,250,250,0.92)] px-3 py-2 font-mono text-[11px] leading-4 text-[#202227] shadow-lg">
+          {terminalDebugSnapshot}
+        </pre>
+      )}
       {exitInfo && (
         <div className="pointer-events-none fixed inset-x-0 bottom-5 z-50 flex justify-center px-4">
           <div className="pointer-events-auto flex w-full max-w-lg flex-col gap-3 rounded-lg border border-[#d9d9dc] bg-white p-4 text-[#383a42] shadow-lg sm:flex-row sm:items-center sm:justify-between">
