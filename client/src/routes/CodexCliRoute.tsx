@@ -10,6 +10,7 @@ import { useAuthContext } from '~/hooks';
 import {
   clearHttpTerminalFallback,
   createTerminalSessionPath,
+  getTerminalTransportPreference,
   rememberHttpTerminalFallback,
   shouldStartTerminalWithHttpFallback,
 } from '~/utils';
@@ -371,6 +372,10 @@ export default function CodexCliRoute() {
 
   const terminalMode: TerminalMode = location.pathname.startsWith('/codex') ? 'codex' : 'shell';
   const routePrefix = terminalMode === 'codex' ? 'codex' : 'terminal';
+  const transportPreference = useMemo(
+    () => getTerminalTransportPreference(location.search),
+    [location.search],
+  );
 
   const activeSessionId = useMemo(() => {
     if (isValidSessionId(sessionId)) {
@@ -1187,7 +1192,7 @@ export default function CodexCliRoute() {
       });
     };
 
-    if (shouldStartTerminalWithHttpFallback()) {
+    if (shouldStartTerminalWithHttpFallback(transportPreference)) {
       void connectWithEventSource();
       return;
     }
@@ -1347,12 +1352,13 @@ export default function CodexCliRoute() {
     startHttpInputStream,
     terminalMode,
     token,
+    transportPreference,
     writeReconnectNotice,
   ]);
 
   const openFreshTerminal = useCallback(() => {
-    navigate(`/${routePrefix}/new`);
-  }, [navigate, routePrefix]);
+    navigate(createTerminalSessionPath(terminalMode, transportPreference));
+  }, [navigate, terminalMode, transportPreference]);
 
   useEffect(() => {
     const container = containerRef.current;
