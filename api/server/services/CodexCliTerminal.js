@@ -1,5 +1,6 @@
 const crypto = require('crypto');
 const path = require('path');
+const { StringDecoder } = require('string_decoder');
 const { WebSocketServer } = require('ws');
 const pty = require('node-pty');
 const { logger } = require('@librechat/data-schemas');
@@ -722,6 +723,86 @@ function writeCodexCliSessionInput(sessionIdValue, user, data) {
   }
 }
 
+function attachCodexCliInputStream(sessionIdValue, user, req, res) {
+  const userId = normalizeUserId(user);
+  const sessionId = normalizeSessionId(sessionIdValue);
+  if (!userId || !sessionId) {
+    res.status(400).json({ ok: false, reason: 'invalid_request' });
+    return null;
+  }
+
+  let session;
+  try {
+    session = getActiveSession({ sessionId, userId });
+  } catch (error) {
+    res.status(404).json({
+      ok: false,
+      reason: error?.message || 'Terminal session unavailable.',
+    });
+    return null;
+  }
+
+  const decoder = new StringDecoder('utf8');
+  const streamLog = {
+    sessionId,
+    sessionKey: getSessionKey(userId, sessionId),
+    userId,
+    mode: session.mode,
+    pid: session.ptyProcess.pid,
+    serverPid: process.pid,
+    serverInstanceId,
+  };
+  logger.info(`[CodexCliTerminal] HTTP input stream attach ${formatLogFields(streamLog)}`, streamLog);
+
+  req.on('data', (chunk) => {
+    if (session.exited) {
+      return;
+    }
+    const data = decoder.write(chunk);
+    if (data) {
+      session.write(data);
+    }
+  });
+
+  req.on('end', () => {
+    const data = decoder.end();
+    if (data && !session.exited) {
+      session.write(data);
+    }
+    if (!res.headersSent) {
+      res.status(204).end();
+      return;
+    }
+    res.end();
+  });
+
+  req.on('close', () => {
+    const closeLog = {
+      sessionId,
+      sessionKey: getSessionKey(userId, sessionId),
+      userId,
+      mode: session.mode,
+      pid: session.ptyProcess.pid,
+      serverPid: process.pid,
+      serverInstanceId,
+    };
+    logger.info(
+      `[CodexCliTerminal] HTTP input stream closed ${formatLogFields(closeLog)}`,
+      closeLog,
+    );
+  });
+
+  req.on('error', (error) => {
+    logger.warn('[CodexCliTerminal] HTTP input stream failed', {
+      sessionId,
+      userId,
+      error: error?.message ?? error,
+    });
+  });
+
+  return { session };
+}
+
 function resizeCodexCliSession(sessionIdValue, user, options = {}) {
   const userId = normalizeUserId(user);
   const sessionId = normalizeSessionId(sessionIdValue);
@@ -903,6 +984,7 @@ function attachCodexCliTerminal(server) {
 
 module.exports = {
   attachCodexCliEventStream,
+  attachCodexCliInputStream,
   attachCodexCliTerminal,
   createCodexCliSession,
   createCodexCliTicket,

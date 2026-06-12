@@ -2,6 +2,7 @@ const express = require('express');
 const requireJwtAuth = require('~/server/middleware/requireJwtAuth');
 const {
   attachCodexCliEventStream,
+  attachCodexCliInputStream,
   createCodexCliSession,
   createCodexCliTicket,
   getCodexCliSessions,
@@ -62,6 +63,10 @@ router.delete('/sessions/:sessionId', (req, res) => {
 router.post('/sessions/:sessionId/input', (req, res) => {
   const result = writeCodexCliSessionInput(req.params.sessionId, req.user, req.body?.data);
   res.status(result.ok ? 200 : 400).json(result);
+});
+
+router.post('/sessions/:sessionId/input-stream', (req, res) => {
+  attachCodexCliInputStream(req.params.sessionId, req.user, req, res);
 });
 
 router.post('/sessions/:sessionId/resize', (req, res) => {

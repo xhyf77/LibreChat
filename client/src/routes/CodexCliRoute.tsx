@@ -32,6 +32,12 @@ type TerminalSessionResponse = {
 
 type TerminalTransport = 'websocket' | 'sse';
 
+type HttpInputStream = {
+  controller: ReadableStreamDefaultController<Uint8Array>;
+  encoder: TextEncoder;
+  closed: boolean;
+};
+
 type TerminalServerMessage = {
   type?: string;
   data?: string;
@@ -236,6 +242,8 @@ export default function CodexCliRoute() {
   const eventSourceRef = useRef<EventSource | null>(null);
   const transportRef = useRef<TerminalTransport | null>(null);
   const activeSessionIdRef = useRef<string | null>(null);
+  const inputStreamRef = useRef<HttpInputStream | null>(null);
+  const inputStreamDisabledRef = useRef(false);
   const queuedInputRef = useRef('');
   const inputFlushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const reconnectCounter = useRef(0);
@@ -259,6 +267,118 @@ export default function CodexCliRoute() {
     activeSessionIdRef.current = activeSessionId;
   }, [activeSessionId]);
 
+  const closeInputStream = useCallback(() => {
+    const stream = inputStreamRef.current;
+    inputStreamRef.current = null;
+    if (!stream || stream.closed) {
+      return;
+    }
+    stream.closed = true;
+    try {
+      stream.controller.close();
+    } catch {
+      // The browser may already have closed or errored the request body.
+    }
+  }, []);
+
+  const startHttpInputStream = useCallback(() => {
+    const session = activeSessionIdRef.current;
+    if (
+      !session ||
+      !token ||
+      hasExitedRef.current ||
+      inputStreamRef.current ||
+      inputStreamDisabledRef.current ||
+      typeof ReadableStream === 'undefined' ||
+      typeof TextEncoder === 'undefined'
+    ) {
+      return;
+    }
+
+    let controller: ReadableStreamDefaultController<Uint8Array> | null = null;
+    const body = new ReadableStream<Uint8Array>({
+      start(streamController) {
+        controller = streamController;
+      },
+    });
+    if (!controller) {
+      inputStreamDisabledRef.current = true;
+      return;
+    }
+
+    const inputStream: HttpInputStream = {
+      controller,
+      encoder: new TextEncoder(),
+      closed: false,
+    };
+    inputStreamRef.current = inputStream;
+
+    const requestInit: RequestInit & { duplex?: 'half' } = {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/octet-stream',
+      },
+      body,
+      duplex: 'half',
+      keepalive: false,
+    };
+
+    let inputRequest: Promise<Response>;
+    try {
+      inputRequest = fetch(
+        `${apiBaseUrl()}/api/codex-cli/sessions/${encodeURIComponent(session)}/input-stream`,
+        requestInit,
+      );
+    } catch {
+      inputStream.closed = true;
+      inputStreamDisabledRef.current = true;
+      if (inputStreamRef.current === inputStream) {
+        inputStreamRef.current = null;
+      }
+      return;
+    }
+
+    void inputRequest
+      .then((response) => {
+        if (!response.ok && inputStreamRef.current === inputStream) {
+          inputStreamDisabledRef.current = true;
+        }
+      })
+      .catch(() => {
+        if (inputStreamRef.current === inputStream) {
+          inputStreamDisabledRef.current = true;
+        }
+      })
+      .finally(() => {
+        if (inputStreamRef.current === inputStream) {
+          inputStream.closed = true;
+          inputStreamRef.current = null;
+        }
+      });
+  }, [token]);
+
+  const postTerminalJson = useCallback(
+    async (path: string, body: Record<string, unknown>) => {
+      if (!token) {
+        throw new Error('missing_auth_token');
+      }
+      const response = await fetch(`${apiBaseUrl()}${path}`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(body),
+        keepalive: false,
+      });
+      if (!response.ok) {
+        throw new Error(`terminal_request_failed_${response.status}`);
+      }
+    },
+    [token],
+  );
+
   const flushQueuedInput = useCallback(() => {
     inputFlushTimerRef.current = null;
     const data = queuedInputRef.current;
@@ -267,24 +387,37 @@ export default function CodexCliRoute() {
     if (!data || !session || hasExitedRef.current) {
       return;
     }
-    request
-      .post(`${apiBaseUrl()}/api/codex-cli/sessions/${encodeURIComponent(session)}/input`, {
-        data,
-      })
+    postTerminalJson(`/api/codex-cli/sessions/${encodeURIComponent(session)}/input`, { data })
       .catch(() => {
         terminalRef.current?.writeln('\r\n[web terminal input failed]\r\n');
       });
-  }, []);
+  }, [postTerminalJson]);
 
   const queueHttpInput = useCallback(
     (data: string) => {
+      if (!inputStreamRef.current && !inputStreamDisabledRef.current) {
+        startHttpInputStream();
+      }
+
+      const inputStream = inputStreamRef.current;
+      if (inputStream && !inputStream.closed) {
+        try {
+          inputStream.controller.enqueue(inputStream.encoder.encode(data));
+          return;
+        } catch {
+          inputStream.closed = true;
+          inputStreamRef.current = null;
+          inputStreamDisabledRef.current = true;
+        }
+      }
+
       queuedInputRef.current += data;
       if (inputFlushTimerRef.current) {
         return;
       }
       inputFlushTimerRef.current = setTimeout(flushQueuedInput, httpInputFlushMs);
     },
-    [flushQueuedInput],
+    [flushQueuedInput, startHttpInputStream],
   );
 
   const sendHttpResize = useCallback((cols: number, rows: number) => {
@@ -292,26 +425,26 @@ export default function CodexCliRoute() {
     if (!session || hasExitedRef.current) {
       return;
     }
-    request
-      .post(`${apiBaseUrl()}/api/codex-cli/sessions/${encodeURIComponent(session)}/resize`, {
-        cols,
-        rows,
-      })
-      .catch(() => undefined);
-  }, []);
+    postTerminalJson(`/api/codex-cli/sessions/${encodeURIComponent(session)}/resize`, {
+      cols,
+      rows,
+    }).catch(() => undefined);
+  }, [postTerminalJson]);
 
   const closeTransports = useCallback(() => {
     socketRef.current?.close();
     socketRef.current = null;
     eventSourceRef.current?.close();
     eventSourceRef.current = null;
+    closeInputStream();
     transportRef.current = null;
+    inputStreamDisabledRef.current = false;
     if (inputFlushTimerRef.current) {
       clearTimeout(inputFlushTimerRef.current);
       inputFlushTimerRef.current = null;
     }
     queuedInputRef.current = '';
-  }, []);
+  }, [closeInputStream]);
 
   useEffect(() => {
     if (activeSessionId) {
@@ -488,6 +621,7 @@ export default function CodexCliRoute() {
           eventSource.close();
           return;
         }
+        startHttpInputStream();
         fitAndNotify();
         terminal.focus();
       });
@@ -502,7 +636,10 @@ export default function CodexCliRoute() {
         if (eventSourceRef.current !== eventSource) {
           return;
         }
-        handleTerminalMessage(message, () => eventSource.close());
+        handleTerminalMessage(message, () => {
+          eventSource.close();
+          closeInputStream();
+        });
       });
 
       eventSource.addEventListener('error', () => {
@@ -515,6 +652,7 @@ export default function CodexCliRoute() {
           terminalRef.current.writeln('\r\n[web terminal disconnected]\r\n');
         }
         eventSource.close();
+        closeInputStream();
       });
     };
 
@@ -616,7 +754,16 @@ export default function CodexCliRoute() {
     socket.addEventListener('error', () => {
       startFallback();
     });
-  }, [activeSessionId, closeTransports, fitAndNotify, isAuthenticated, terminalMode, token]);
+  }, [
+    activeSessionId,
+    closeInputStream,
+    closeTransports,
+    fitAndNotify,
+    isAuthenticated,
+    startHttpInputStream,
+    terminalMode,
+    token,
+  ]);
 
   const openFreshTerminal = useCallback(() => {
     navigate(`/${routePrefix}/new`);
