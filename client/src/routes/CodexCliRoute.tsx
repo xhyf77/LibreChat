@@ -104,12 +104,16 @@ const terminalReplayChunkChars = 64 * 1024;
 const terminalLiveWriteFlushChars = 48 * 1024;
 const terminalLiveDirectWriteChars = 2048;
 const terminalLiveDirectWriteMinIntervalMs = 6;
+const terminalWritePendingMaxChars = 512 * 1024;
 const terminalHiddenBacklogMaxChars = 256 * 1024;
 const terminalRestoreThrottleMs = 250;
 const terminalResponseSuppressMs = 1500;
 const httpInputFlushMs = 1;
 const websocketFallbackMs = 1800;
 const websocketUnstableCloseMs = 120_000;
+const reconnectMinDelayMs = 150;
+const reconnectMaxDelayMs = 5000;
+const reconnectNoticeMinIntervalMs = 5000;
 const pendingReconnectInputFlushMs = 150;
 const pendingReconnectInputLimit = 1024 * 1024;
 const terminalQueryResponsePattern =
@@ -336,6 +340,9 @@ export default function CodexCliRoute() {
   const inputFlushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pendingInputFlushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const requestReconnectRef = useRef<() => void>(() => undefined);
+  const reconnectAttemptRef = useRef(0);
+  const lastReconnectNoticeAtRef = useRef(0);
   const snapshotClearTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pendingSnapshotCancelRef = useRef<(() => void) | null>(null);
   const lastSnapshotAtRef = useRef(0);
@@ -350,6 +357,12 @@ export default function CodexCliRoute() {
   const terminalOutputBufferRef = useRef('');
   const terminalOutputFrameRef = useRef(0);
   const terminalOutputTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const terminalWriteInFlightRef = useRef(false);
+  const terminalWritePendingRef = useRef('');
+  const terminalWriteGenerationRef = useRef(0);
+  const writeTerminalOutputRef = useRef<(data: string, callback?: () => void) => void>(
+    () => undefined,
+  );
   const lastDirectTerminalWriteAtRef = useRef(0);
   const suppressTerminalResponsesUntilRef = useRef(0);
   const hasExitedRef = useRef(false);
@@ -395,15 +408,57 @@ export default function CodexCliRoute() {
     }
   }, []);
 
-  const flushQueuedTerminalOutput = useCallback(() => {
-    cancelQueuedTerminalOutput();
+  const resetTerminalWriteQueue = useCallback(() => {
+    terminalWriteGenerationRef.current += 1;
+    terminalWriteInFlightRef.current = false;
+    terminalWritePendingRef.current = '';
+  }, []);
+
+  const writeTerminalOutput = useCallback((data: string, callback?: () => void) => {
     const terminal = terminalRef.current;
-    const data = terminalOutputBufferRef.current;
-    terminalOutputBufferRef.current = '';
     if (!terminal || !data) {
+      callback?.();
       return;
     }
-    writeTerminalData(terminal, data);
+
+    if (terminalWriteInFlightRef.current) {
+      terminalWritePendingRef.current += data;
+      if (terminalWritePendingRef.current.length > terminalWritePendingMaxChars) {
+        terminalWritePendingRef.current = '';
+        resetBeforeReplayRef.current = true;
+        requestReconnectRef.current();
+      }
+      callback?.();
+      return;
+    }
+
+    const generation = terminalWriteGenerationRef.current;
+    terminalWriteInFlightRef.current = true;
+    writeTerminalData(terminal, data, () => {
+      if (terminalWriteGenerationRef.current !== generation) {
+        callback?.();
+        return;
+      }
+      terminalWriteInFlightRef.current = false;
+      callback?.();
+      const pending = terminalWritePendingRef.current;
+      terminalWritePendingRef.current = '';
+      if (pending) {
+        window.setTimeout(() => writeTerminalOutputRef.current(pending), 0);
+      }
+    });
+  }, []);
+
+  writeTerminalOutputRef.current = writeTerminalOutput;
+
+  const flushQueuedTerminalOutput = useCallback(() => {
+    cancelQueuedTerminalOutput();
+    const data = terminalOutputBufferRef.current;
+    terminalOutputBufferRef.current = '';
+    if (!data) {
+      return;
+    }
+    writeTerminalOutputRef.current(data);
   }, [cancelQueuedTerminalOutput]);
 
   const scheduleQueuedTerminalOutput = useCallback(() => {
@@ -442,7 +497,7 @@ export default function CodexCliRoute() {
         const terminal = terminalRef.current;
         if (terminal) {
           lastDirectTerminalWriteAtRef.current = Date.now();
-          writeTerminalData(terminal, data);
+          writeTerminalOutputRef.current(data);
           return;
         }
       }
@@ -551,15 +606,16 @@ export default function CodexCliRoute() {
       return false;
     }
     try {
+      resetTerminalWriteQueue();
       terminal.reset();
-      writeTerminalData(terminal, snapshot.data, () => {
+      writeTerminalOutputRef.current(snapshot.data, () => {
         terminal.refresh(0, Math.max(0, terminal.rows - 1));
       });
       return true;
     } catch {
       return false;
     }
-  }, [getTerminalSnapshotKey]);
+  }, [getTerminalSnapshotKey, resetTerminalWriteQueue]);
 
   const startHttpInputStream = useCallback(() => {
     const session = activeSessionIdRef.current;
@@ -650,15 +706,28 @@ export default function CodexCliRoute() {
     return false;
   }, []);
 
+  const writeReconnectNotice = useCallback((message: string) => {
+    const now = Date.now();
+    if (now - lastReconnectNoticeAtRef.current < reconnectNoticeMinIntervalMs) {
+      return;
+    }
+    lastReconnectNoticeAtRef.current = now;
+    terminalRef.current?.writeln(message);
+  }, []);
+
   const requestReconnect = useCallback(() => {
     if (hasExitedRef.current || reconnectTimerRef.current) {
       return;
     }
+    const attempt = reconnectAttemptRef.current;
+    reconnectAttemptRef.current = Math.min(attempt + 1, 8);
+    const delay = Math.min(reconnectMaxDelayMs, reconnectMinDelayMs * 2 ** Math.min(attempt, 5));
     reconnectTimerRef.current = setTimeout(() => {
       reconnectTimerRef.current = null;
       setReconnectNonce((value) => value + 1);
-    }, 150);
+    }, delay);
   }, []);
+  requestReconnectRef.current = requestReconnect;
 
   const queueReconnectInput = useCallback((data: string) => {
     if (!data) {
@@ -893,6 +962,7 @@ export default function CodexCliRoute() {
       return;
     }
     reconnectCounter.current += 1;
+    reconnectAttemptRef.current = 0;
     closeTransports();
     lastSessionIdRef.current = terminalKey;
     pendingReconnectInputRef.current = '';
@@ -952,9 +1022,10 @@ export default function CodexCliRoute() {
 
       if (message.type === 'replay') {
         clearQueuedTerminalOutput();
+        resetTerminalWriteQueue();
         terminal.reset();
         resetBeforeReplayRef.current = false;
-        writeTerminalData(terminal, message.data ?? '', () => {
+        writeTerminalOutputRef.current(message.data ?? '', () => {
           fitAndNotify();
           terminal.refresh(0, Math.max(0, terminal.rows - 1));
           terminalSnapshotRef.current = null;
@@ -973,6 +1044,7 @@ export default function CodexCliRoute() {
       if (message.type === 'data') {
         if (resetBeforeReplayRef.current) {
           clearQueuedTerminalOutput();
+          resetTerminalWriteQueue();
           terminal.reset();
           resetBeforeReplayRef.current = false;
         }
@@ -1000,6 +1072,7 @@ export default function CodexCliRoute() {
           return;
         }
         connectedRef.current = true;
+        reconnectAttemptRef.current = 0;
         reconnectOnVisibleRef.current = false;
         if (pendingReconnectInputRef.current) {
           if (pendingInputFlushTimerRef.current) {
@@ -1036,7 +1109,10 @@ export default function CodexCliRoute() {
       try {
         sseTicketResponse = await requestTicket();
       } catch {
-        terminalRef.current?.writeln('\r\n[web terminal] failed to open terminal session\r\n');
+        if (connectionId === reconnectCounter.current && !hasExitedRef.current) {
+          writeReconnectNotice('\r\n[web terminal] reconnecting...\r\n');
+          requestReconnect();
+        }
         return;
       }
 
@@ -1091,14 +1167,14 @@ export default function CodexCliRoute() {
           terminalRef.current &&
           !hasExitedRef.current
         ) {
-          terminalRef.current.writeln('\r\n[web terminal disconnected]\r\n');
+          writeReconnectNotice('\r\n[web terminal disconnected, reconnecting]\r\n');
         }
         if (connectionId === reconnectCounter.current && eventSourceRef.current === eventSource) {
           eventSourceRef.current = null;
           transportRef.current = null;
           connectedRef.current = false;
-          if (!hasExitedRef.current && sseSawReady) {
-            resetBeforeReplayRef.current = true;
+          if (!hasExitedRef.current) {
+            resetBeforeReplayRef.current = resetBeforeReplayRef.current || sseSawReady;
             if (typeof document !== 'undefined' && document.hidden) {
               reconnectOnVisibleRef.current = true;
             } else {
@@ -1120,7 +1196,10 @@ export default function CodexCliRoute() {
     try {
       ticketResponse = await requestTicket();
     } catch {
-      terminalRef.current?.writeln('\r\n[web terminal] failed to open terminal session\r\n');
+      if (connectionId === reconnectCounter.current && !hasExitedRef.current) {
+        writeReconnectNotice('\r\n[web terminal] reconnecting...\r\n');
+        requestReconnect();
+      }
       return;
     }
 
@@ -1211,6 +1290,7 @@ export default function CodexCliRoute() {
       if (message.type === 'ready') {
         sawReady = true;
         websocketReadyAt = Date.now();
+        reconnectAttemptRef.current = 0;
         clearFallbackTimer();
         clearHttpTerminalFallback();
       }
@@ -1245,7 +1325,7 @@ export default function CodexCliRoute() {
         terminalRef.current &&
         !hasExitedRef.current
       ) {
-        terminalRef.current.writeln('\r\n[web terminal disconnected]\r\n');
+        writeReconnectNotice('\r\n[web terminal disconnected, reconnecting]\r\n');
       }
     });
 
@@ -1263,9 +1343,11 @@ export default function CodexCliRoute() {
     isAuthenticated,
     queueTerminalOutput,
     requestReconnect,
+    resetTerminalWriteQueue,
     startHttpInputStream,
     terminalMode,
     token,
+    writeReconnectNotice,
   ]);
 
   const openFreshTerminal = useCallback(() => {
@@ -1380,6 +1462,7 @@ export default function CodexCliRoute() {
       dataDisposable.dispose();
       disposeClipboardHandlers();
       clearQueuedTerminalOutput();
+      resetTerminalWriteQueue();
       closeTransports();
       cancelPendingSnapshot();
       if (snapshotClearTimerRef.current) {
@@ -1403,6 +1486,7 @@ export default function CodexCliRoute() {
     queueReconnectInput,
     queueTerminalOutput,
     requestReconnect,
+    resetTerminalWriteQueue,
   ]);
 
   useEffect(() => {

@@ -18,6 +18,12 @@ const COMPACT_REPLAY_SCROLLBACK_ROWS = 300;
 const MAX_ATTACH_BACKLOG_BYTES = 1024 * 1024;
 const LIVE_OUTPUT_FLUSH_MS = 4;
 const LIVE_OUTPUT_FLUSH_CHARS = 64 * 1024;
+const HEADLESS_WRITE_FLUSH_MS = 16;
+const HEADLESS_WRITE_FLUSH_CHARS = 128 * 1024;
+const HEADLESS_MAX_PENDING_BYTES = 2 * 1024 * 1024;
+const HEADLESS_REPLAY_WAIT_MS = 250;
+const WS_MAX_BUFFERED_BYTES = 2 * 1024 * 1024;
+const SSE_MAX_BUFFERED_BYTES = 2 * 1024 * 1024;
 const HEARTBEAT_INTERVAL_MS = 30_000;
 const SSE_HEARTBEAT_INTERVAL_MS = 15_000;
 
@@ -166,8 +172,27 @@ function consumeTicket(ticket) {
 }
 
 function wsSend(ws, message) {
-  if (ws.readyState === ws.OPEN) {
+  if (ws.readyState !== ws.OPEN) {
+    return false;
+  }
+  if (ws.bufferedAmount > WS_MAX_BUFFERED_BYTES) {
+    try {
+      ws.close(1013, 'Terminal client is too far behind');
+    } catch {
+      // Ignore close races.
+    }
+    return false;
+  }
+  try {
     ws.send(JSON.stringify(message));
+    return true;
+  } catch {
+    try {
+      ws.close(1011, 'Terminal send failed');
+    } catch {
+      // Ignore close races.
+    }
+    return false;
   }
 }
 
@@ -219,8 +244,23 @@ function serializeSession(session) {
 }
 
 function writeSseMessage(res, message) {
-  res.write(`data: ${JSON.stringify(message)}\n\n`);
-  res.flush?.();
+  if (res.destroyed || res.writableEnded || res.writableLength > SSE_MAX_BUFFERED_BYTES) {
+    return false;
+  }
+  try {
+    const ok = res.write(`data: ${JSON.stringify(message)}\n\n`);
+    res.flush?.();
+    return ok || res.writableLength <= SSE_MAX_BUFFERED_BYTES;
+  } catch {
+    return false;
+  }
+}
+
+function timeout(ms) {
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, ms);
+    timer.unref?.();
+  });
 }
 
 class CodexCliSession {
@@ -239,6 +279,9 @@ class CodexCliSession {
     this.replaySeq = 0;
     this.liveOutputBuffer = '';
     this.liveOutputTimer = null;
+    this.headlessPendingBuffer = '';
+    this.headlessPendingBytes = 0;
+    this.headlessFlushTimer = null;
     this.headlessWriteChain = Promise.resolve();
     this.headlessWriteFailed = false;
     this.headlessTerminal = new HeadlessTerminal({
@@ -355,28 +398,20 @@ class CodexCliSession {
     this.liveOutputTimer.unref?.();
   }
 
-  appendBuffer(data) {
-    this.buffer += data;
-    this.bufferBytes += Buffer.byteLength(data, 'utf8');
-    if (this.bufferBytes <= MAX_REPLAY_BYTES) {
+  cancelHeadlessFlushTimer() {
+    if (!this.headlessFlushTimer) {
       return;
     }
-
-    const keepRatio = REPLAY_TRIM_TARGET_BYTES / this.bufferBytes;
-    let keepChars = Math.max(1, Math.floor(this.buffer.length * keepRatio));
-    this.buffer = this.buffer.slice(-keepChars);
-    this.bufferBytes = Buffer.byteLength(this.buffer, 'utf8');
-
-    while (this.bufferBytes > MAX_REPLAY_BYTES && keepChars > 1) {
-      keepChars = Math.max(1, Math.floor(keepChars * 0.75));
-      this.buffer = this.buffer.slice(-keepChars);
-      this.bufferBytes = Buffer.byteLength(this.buffer, 'utf8');
-    }
+    clearTimeout(this.headlessFlushTimer);
+    this.headlessFlushTimer = null;
   }
 
-  queueHeadlessWrite(data) {
-    this.replaySeq += 1;
-    if (!this.headlessTerminal || this.headlessWriteFailed) {
+  flushHeadlessWrite() {
+    this.cancelHeadlessFlushTimer();
+    const data = this.headlessPendingBuffer;
+    this.headlessPendingBuffer = '';
+    this.headlessPendingBytes = 0;
+    if (!data || !this.headlessTerminal || this.headlessWriteFailed) {
       return;
     }
     this.headlessWriteChain = this.headlessWriteChain
@@ -404,13 +439,73 @@ class CodexCliSession {
       });
   }
 
+  appendBuffer(data) {
+    this.buffer += data;
+    this.bufferBytes += Buffer.byteLength(data, 'utf8');
+    if (this.bufferBytes <= MAX_REPLAY_BYTES) {
+      return;
+    }
+
+    const keepRatio = REPLAY_TRIM_TARGET_BYTES / this.bufferBytes;
+    let keepChars = Math.max(1, Math.floor(this.buffer.length * keepRatio));
+    this.buffer = this.buffer.slice(-keepChars);
+    this.bufferBytes = Buffer.byteLength(this.buffer, 'utf8');
+
+    while (this.bufferBytes > MAX_REPLAY_BYTES && keepChars > 1) {
+      keepChars = Math.max(1, Math.floor(keepChars * 0.75));
+      this.buffer = this.buffer.slice(-keepChars);
+      this.bufferBytes = Buffer.byteLength(this.buffer, 'utf8');
+    }
+  }
+
+  queueHeadlessWrite(data) {
+    this.replaySeq += 1;
+    if (!this.headlessTerminal || this.headlessWriteFailed) {
+      return;
+    }
+    this.headlessPendingBuffer += data;
+    this.headlessPendingBytes += Buffer.byteLength(data, 'utf8');
+    if (this.headlessPendingBytes > HEADLESS_MAX_PENDING_BYTES) {
+      this.headlessWriteFailed = true;
+      this.headlessPendingBuffer = '';
+      this.headlessPendingBytes = 0;
+      this.cancelHeadlessFlushTimer();
+      logger.warn('[CodexCliTerminal] Headless terminal disabled after falling behind', {
+        sessionId: this.sessionId,
+      });
+      return;
+    }
+    if (this.headlessPendingBytes >= HEADLESS_WRITE_FLUSH_CHARS) {
+      this.flushHeadlessWrite();
+      return;
+    }
+    if (this.headlessFlushTimer) {
+      return;
+    }
+    this.headlessFlushTimer = setTimeout(() => {
+      this.headlessFlushTimer = null;
+      this.flushHeadlessWrite();
+    }, HEADLESS_WRITE_FLUSH_MS);
+    this.headlessFlushTimer.unref?.();
+  }
+
   async createReplayMessage() {
     const seq = this.replaySeq;
     if (!this.headlessTerminal || !this.serializeAddon || this.headlessWriteFailed) {
       return { type: 'replay', data: this.buffer, seq, replayKind: 'raw-tail' };
     }
     try {
-      await this.headlessWriteChain;
+      this.flushHeadlessWrite();
+      let timedOut = false;
+      await Promise.race([
+        this.headlessWriteChain,
+        timeout(HEADLESS_REPLAY_WAIT_MS).then(() => {
+          timedOut = true;
+        }),
+      ]);
+      if (timedOut) {
+        return { type: 'replay', data: this.buffer, seq, replayKind: 'raw-tail' };
+      }
       let replayScrollbackRows = getReplayScrollbackRows();
       let replayData = this.serializeAddon.serialize({ scrollback: replayScrollbackRows });
       if (
@@ -450,7 +545,11 @@ class CodexCliSession {
         if (client.closed) {
           return;
         }
-        send(message);
+        if (send(message) === false) {
+          client.closed = true;
+          close();
+          return;
+        }
         client.replaying = false;
         const backlog = client.replayBacklog || [];
         client.replayBacklog = [];
@@ -459,7 +558,11 @@ class CodexCliSession {
           if (client.closed) {
             return;
           }
-          send({ type: 'data', data });
+          if (send({ type: 'data', data }) === false) {
+            client.closed = true;
+            close();
+            return;
+          }
         }
         if (this.exited && this.exitInfo && !client.closed) {
           send({ type: 'exit', ...this.exitInfo });
@@ -473,12 +576,17 @@ class CodexCliSession {
         });
         if (!client.closed) {
           client.replaying = false;
-          send({ type: 'replay', data: this.buffer, seq: this.replaySeq, replayKind: 'raw-tail' });
+          if (send({ type: 'replay', data: this.buffer, seq: this.replaySeq, replayKind: 'raw-tail' }) === false) {
+            client.closed = true;
+          }
         }
       });
   }
 
   sendOrBufferClient(client, send, message) {
+    if (client.closed) {
+      return;
+    }
     if (client.replaying && message.type === 'data') {
       const data = message.data ?? '';
       client.replayBacklog.push(data);
@@ -489,7 +597,10 @@ class CodexCliSession {
       }
       return;
     }
-    send(message);
+    if (send(message) === false) {
+      client.closed = true;
+      client.close?.();
+    }
   }
 
   attach(ws) {
@@ -527,6 +638,9 @@ class CodexCliSession {
       replayBacklog: [],
       replayBacklogBytes: 0,
       close: () => {
+        if (client.closed) {
+          return;
+        }
         client.closed = true;
         clearInterval(client.heartbeatTimer);
         this.eventClients.delete(client);
@@ -535,9 +649,15 @@ class CodexCliSession {
         }
       },
       send: (message) => {
-        if (!res.destroyed) {
-          writeSseMessage(res, message);
+        if (client.closed || res.destroyed) {
+          client.close();
+          return false;
         }
+        const ok = writeSseMessage(res, message);
+        if (!ok && res.writableLength > SSE_MAX_BUFFERED_BYTES) {
+          client.close();
+        }
+        return ok;
       },
     };
 
@@ -548,7 +668,15 @@ class CodexCliSession {
         client.close();
         return;
       }
-      res.write(': keepalive\n\n');
+      try {
+        if (res.writableLength > SSE_MAX_BUFFERED_BYTES) {
+          client.close();
+          return;
+        }
+        res.write(': keepalive\n\n');
+      } catch {
+        client.close();
+      }
     }, SSE_HEARTBEAT_INTERVAL_MS);
     client.heartbeatTimer.unref?.();
 
@@ -620,6 +748,7 @@ class CodexCliSession {
     };
     logger.info(`[CodexCliTerminal] PTY exited ${formatLogFields(exitLog)}`, exitLog);
     this.cancelLiveOutputTimer();
+    this.cancelHeadlessFlushTimer();
     this.serializeAddon?.dispose?.();
     this.headlessTerminal?.dispose?.();
     return true;
@@ -922,6 +1051,11 @@ function attachCodexCliEventStream({ ticket: ticketValue, sessionId: sessionIdVa
   res.write(': connected\n\n');
 
   const client = session.attachEventStream(res);
+  const cleanup = () => client.close();
+  res.req?.on('close', cleanup);
+  res.req?.on('error', cleanup);
+  res.on('close', cleanup);
+  res.on('error', cleanup);
   return { client, session };
 }
 
