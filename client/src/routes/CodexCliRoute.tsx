@@ -80,6 +80,7 @@ type TerminalDebugMetrics = {
   httpPostChars: number;
   wsInputChars: number;
   terminalWriteOverflows: number;
+  blankRecoveries: number;
   maxTerminalWritePendingChars: number;
   lastInputAt: number;
   lastEchoMs: number | null;
@@ -148,6 +149,7 @@ const terminalWordSequences = {
 };
 const terminalDebugStorageKey = 'ruc-terminal-debug';
 const terminalDebugRefreshMs = 1000;
+const terminalBlankRecoveryMinIntervalMs = 1500;
 
 function createTerminalDebugMetrics(): TerminalDebugMetrics {
   return {
@@ -163,6 +165,7 @@ function createTerminalDebugMetrics(): TerminalDebugMetrics {
     httpPostChars: 0,
     wsInputChars: 0,
     terminalWriteOverflows: 0,
+    blankRecoveries: 0,
     maxTerminalWritePendingChars: 0,
     lastInputAt: 0,
     lastEchoMs: null,
@@ -420,6 +423,7 @@ export default function CodexCliRoute() {
   const pendingSnapshotCancelRef = useRef<(() => void) | null>(null);
   const lastSnapshotAtRef = useRef(0);
   const skipSnapshotsUntilRef = useRef(0);
+  const lastBlankRecoveryAtRef = useRef(0);
   const reconnectCounter = useRef(0);
   const lastSessionIdRef = useRef<string | null>(null);
   const pendingSessionCreateRef = useRef<TerminalMode | null>(null);
@@ -490,6 +494,7 @@ export default function CodexCliRoute() {
           `ws input chars: ${metrics.wsInputChars}`,
           `xterm pending max: ${metrics.maxTerminalWritePendingChars}`,
           `xterm overflows: ${metrics.terminalWriteOverflows}`,
+          `blank recoveries: ${metrics.blankRecoveries}`,
         ].join('\n'),
       );
     };
@@ -737,6 +742,33 @@ export default function CodexCliRoute() {
       return false;
     }
   }, [getTerminalSnapshotKey, resetTerminalWriteQueue]);
+
+  const recoverBlankTerminal = useCallback(() => {
+    const terminal = terminalRef.current;
+    if (
+      !terminal ||
+      !activeSessionIdRef.current ||
+      hasExitedRef.current ||
+      !isTerminalViewportBlank(terminal)
+    ) {
+      return false;
+    }
+
+    if (restoreTerminalSnapshotIfBlank()) {
+      return false;
+    }
+
+    const now = Date.now();
+    if (now - lastBlankRecoveryAtRef.current < terminalBlankRecoveryMinIntervalMs) {
+      return false;
+    }
+    lastBlankRecoveryAtRef.current = now;
+    terminalDebugMetricsRef.current.blankRecoveries += 1;
+    resetBeforeReplayRef.current = true;
+    reconnectOnVisibleRef.current = false;
+    requestReconnectRef.current();
+    return true;
+  }, [restoreTerminalSnapshotIfBlank]);
 
   const startHttpInputStream = useCallback(() => {
     const session = activeSessionIdRef.current;
@@ -1665,16 +1697,14 @@ export default function CodexCliRoute() {
           activeSessionIdRef.current &&
           !hasExitedRef.current &&
           (reconnectOnVisibleRef.current || !isTransportUsable());
-        if (!needsReconnect) {
-          restoreTerminalSnapshotIfBlank();
-        }
+        const recoveredBlankTerminal = recoverBlankTerminal();
         terminal.focus();
 
         if (transportRef.current === 'sse') {
           startHttpInputStream();
         }
 
-        if (needsReconnect) {
+        if (needsReconnect && !recoveredBlankTerminal) {
           reconnectOnVisibleRef.current = false;
           resetBeforeReplayRef.current = true;
           requestReconnect();
@@ -1735,8 +1765,8 @@ export default function CodexCliRoute() {
     fitAndNotify,
     flushQueuedTerminalOutput,
     isTransportUsable,
+    recoverBlankTerminal,
     requestReconnect,
-    restoreTerminalSnapshotIfBlank,
     scheduleTerminalSnapshot,
     startHttpInputStream,
   ]);
