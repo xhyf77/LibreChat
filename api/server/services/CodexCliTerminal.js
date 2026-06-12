@@ -15,6 +15,8 @@ const MAX_REPLAY_BYTES = 2 * 1024 * 1024;
 const DEFAULT_REPLAY_SCROLLBACK_ROWS = 3000;
 const COMPACT_REPLAY_SCROLLBACK_ROWS = 500;
 const MAX_ATTACH_BACKLOG_BYTES = 2 * 1024 * 1024;
+const LIVE_OUTPUT_FLUSH_MS = 8;
+const LIVE_OUTPUT_FLUSH_CHARS = 64 * 1024;
 const HEARTBEAT_INTERVAL_MS = 30_000;
 const SSE_HEARTBEAT_INTERVAL_MS = 15_000;
 
@@ -232,6 +234,8 @@ class CodexCliSession {
     this.processExited = false;
     this.exitInfo = null;
     this.replaySeq = 0;
+    this.liveOutputBuffer = '';
+    this.liveOutputTimer = null;
     this.headlessWriteChain = Promise.resolve();
     this.headlessWriteFailed = false;
     this.headlessTerminal = new HeadlessTerminal({
@@ -266,7 +270,7 @@ class CodexCliSession {
     this.ptyProcess.onData((data) => {
       this.appendBuffer(data);
       this.queueHeadlessWrite(data);
-      this.broadcast({ type: 'data', data });
+      this.queueLiveOutput(data);
     });
 
     this.ptyProcess.onExit((event) => {
@@ -305,6 +309,47 @@ class CodexCliSession {
         this.write(`${command}\r`);
       }, 100);
     }
+  }
+
+  hasLiveClients() {
+    return this.clients.size > 0 || this.eventClients.size > 0;
+  }
+
+  cancelLiveOutputTimer() {
+    if (!this.liveOutputTimer) {
+      return;
+    }
+    clearTimeout(this.liveOutputTimer);
+    this.liveOutputTimer = null;
+  }
+
+  flushLiveOutput() {
+    this.cancelLiveOutputTimer();
+    const data = this.liveOutputBuffer;
+    this.liveOutputBuffer = '';
+    if (!data || !this.hasLiveClients()) {
+      return;
+    }
+    this.broadcast({ type: 'data', data });
+  }
+
+  queueLiveOutput(data) {
+    if (!data || !this.hasLiveClients()) {
+      return;
+    }
+    this.liveOutputBuffer += data;
+    if (this.liveOutputBuffer.length >= LIVE_OUTPUT_FLUSH_CHARS) {
+      this.flushLiveOutput();
+      return;
+    }
+    if (this.liveOutputTimer) {
+      return;
+    }
+    this.liveOutputTimer = setTimeout(() => {
+      this.liveOutputTimer = null;
+      this.flushLiveOutput();
+    }, LIVE_OUTPUT_FLUSH_MS);
+    this.liveOutputTimer.unref?.();
   }
 
   appendBuffer(data) {
@@ -447,6 +492,7 @@ class CodexCliSession {
       replayBacklogBytes: 0,
     };
     ws.codexReplayClient = client;
+    this.flushLiveOutput();
     this.clients.add(ws);
     wsSend(ws, {
       type: 'ready',
@@ -487,6 +533,7 @@ class CodexCliSession {
       },
     };
 
+    this.flushLiveOutput();
     this.eventClients.add(client);
     client.heartbeatTimer = setInterval(() => {
       if (res.destroyed) {
@@ -538,6 +585,7 @@ class CodexCliSession {
     this.exited = true;
     this.exitInfo = exitInfo;
     sessions.delete(getSessionKey(this.userId, this.sessionId));
+    this.flushLiveOutput();
     this.broadcast({ type: 'exit', ...exitInfo });
     for (const client of this.clients) {
       if (client.codexReplayClient) {
@@ -563,6 +611,7 @@ class CodexCliSession {
       ...exitInfo,
     };
     logger.info(`[CodexCliTerminal] PTY exited ${formatLogFields(exitLog)}`, exitLog);
+    this.cancelLiveOutputTimer();
     this.serializeAddon?.dispose?.();
     this.headlessTerminal?.dispose?.();
     return true;

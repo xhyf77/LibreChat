@@ -3,6 +3,7 @@ import { Link, useLocation, useNavigate, useParams } from 'react-router-dom';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { SerializeAddon } from '@xterm/addon-serialize';
+import { WebglAddon } from '@xterm/addon-webgl';
 import { apiBaseUrl, request } from 'librechat-data-provider';
 import copyToClipboard from 'copy-to-clipboard';
 import { useAuthContext } from '~/hooks';
@@ -94,6 +95,8 @@ const terminalSnapshotSlowMs = 120;
 const terminalSnapshotSlowBackoffMs = 15000;
 const terminalSnapshotTtlMs = 30000;
 const terminalReplayChunkChars = 64 * 1024;
+const terminalLiveWriteFlushChars = 48 * 1024;
+const terminalHiddenWriteFlushMs = 32;
 const terminalRestoreThrottleMs = 250;
 const terminalResponseSuppressMs = 1500;
 const httpInputFlushMs = 8;
@@ -310,6 +313,7 @@ export default function CodexCliRoute() {
   const terminalRef = useRef<Terminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
   const serializeAddonRef = useRef<SerializeAddon | null>(null);
+  const renderAddonRef = useRef<WebglAddon | null>(null);
   const socketRef = useRef<WebSocket | null>(null);
   const eventSourceRef = useRef<EventSource | null>(null);
   const transportRef = useRef<TerminalTransport | null>(null);
@@ -332,6 +336,9 @@ export default function CodexCliRoute() {
   const reconnectOnVisibleRef = useRef(false);
   const resetBeforeReplayRef = useRef(false);
   const terminalSnapshotRef = useRef<TerminalSnapshot | null>(null);
+  const terminalOutputBufferRef = useRef('');
+  const terminalOutputFrameRef = useRef(0);
+  const terminalOutputTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const suppressTerminalResponsesUntilRef = useRef(0);
   const hasExitedRef = useRef(false);
   const [reconnectNonce, setReconnectNonce] = useState(0);
@@ -364,6 +371,65 @@ export default function CodexCliRoute() {
       // The browser may already have closed or errored the request body.
     }
   }, []);
+
+  const cancelQueuedTerminalOutput = useCallback(() => {
+    if (terminalOutputFrameRef.current) {
+      window.cancelAnimationFrame(terminalOutputFrameRef.current);
+      terminalOutputFrameRef.current = 0;
+    }
+    if (terminalOutputTimerRef.current) {
+      clearTimeout(terminalOutputTimerRef.current);
+      terminalOutputTimerRef.current = null;
+    }
+  }, []);
+
+  const flushQueuedTerminalOutput = useCallback(() => {
+    cancelQueuedTerminalOutput();
+    const terminal = terminalRef.current;
+    const data = terminalOutputBufferRef.current;
+    terminalOutputBufferRef.current = '';
+    if (!terminal || !data) {
+      return;
+    }
+    writeTerminalData(terminal, data);
+  }, [cancelQueuedTerminalOutput]);
+
+  const scheduleQueuedTerminalOutput = useCallback(() => {
+    if (terminalOutputFrameRef.current || terminalOutputTimerRef.current) {
+      return;
+    }
+    if (typeof document !== 'undefined' && document.hidden) {
+      terminalOutputTimerRef.current = setTimeout(() => {
+        terminalOutputTimerRef.current = null;
+        flushQueuedTerminalOutput();
+      }, terminalHiddenWriteFlushMs);
+      return;
+    }
+    terminalOutputFrameRef.current = window.requestAnimationFrame(() => {
+      terminalOutputFrameRef.current = 0;
+      flushQueuedTerminalOutput();
+    });
+  }, [flushQueuedTerminalOutput]);
+
+  const queueTerminalOutput = useCallback(
+    (data: string) => {
+      if (!data) {
+        return;
+      }
+      terminalOutputBufferRef.current += data;
+      if (terminalOutputBufferRef.current.length >= terminalLiveWriteFlushChars) {
+        flushQueuedTerminalOutput();
+        return;
+      }
+      scheduleQueuedTerminalOutput();
+    },
+    [flushQueuedTerminalOutput, scheduleQueuedTerminalOutput],
+  );
+
+  const clearQueuedTerminalOutput = useCallback(() => {
+    cancelQueuedTerminalOutput();
+    terminalOutputBufferRef.current = '';
+  }, [cancelQueuedTerminalOutput]);
 
   const getTerminalSnapshotKey = useCallback(() => {
     const session = activeSessionIdRef.current;
@@ -851,6 +917,7 @@ export default function CodexCliRoute() {
       }
 
       if (message.type === 'replay') {
+        clearQueuedTerminalOutput();
         terminal.reset();
         resetBeforeReplayRef.current = false;
         writeTerminalData(terminal, message.data ?? '', () => {
@@ -871,10 +938,11 @@ export default function CodexCliRoute() {
       }
       if (message.type === 'data') {
         if (resetBeforeReplayRef.current) {
+          clearQueuedTerminalOutput();
           terminal.reset();
           resetBeforeReplayRef.current = false;
         }
-        terminal.write(message.data ?? '');
+        queueTerminalOutput(message.data ?? '');
         return;
       }
       if (message.type === 'ready') {
@@ -917,6 +985,7 @@ export default function CodexCliRoute() {
           exitCode: message.exitCode,
           signal: message.signal,
         });
+        flushQueuedTerminalOutput();
         terminal.writeln('\r\n[terminal exited]\r\n');
         closeCurrentTransport();
       }
@@ -1123,11 +1192,14 @@ export default function CodexCliRoute() {
     });
   }, [
     activeSessionId,
+    clearQueuedTerminalOutput,
     closeInputStream,
     closeTransports,
     fitAndNotify,
     flushPendingReconnectInput,
+    flushQueuedTerminalOutput,
     isAuthenticated,
+    queueTerminalOutput,
     requestReconnect,
     startHttpInputStream,
     terminalMode,
@@ -1163,6 +1235,20 @@ export default function CodexCliRoute() {
     terminal.loadAddon(fitAddon);
     terminal.loadAddon(serializeAddon);
     terminal.open(container);
+    try {
+      const renderAddon = new WebglAddon();
+      renderAddon.onContextLoss(() => {
+        if (renderAddonRef.current === renderAddon) {
+          renderAddonRef.current = null;
+        }
+        renderAddon.dispose();
+        terminal.refresh(0, Math.max(0, terminal.rows - 1));
+      });
+      terminal.loadAddon(renderAddon);
+      renderAddonRef.current = renderAddon;
+    } catch {
+      renderAddonRef.current = null;
+    }
     terminalRef.current = terminal;
     fitAddonRef.current = fitAddon;
     serializeAddonRef.current = serializeAddon;
@@ -1230,6 +1316,7 @@ export default function CodexCliRoute() {
       resizeObserver.disconnect();
       dataDisposable.dispose();
       disposeClipboardHandlers();
+      clearQueuedTerminalOutput();
       closeTransports();
       cancelPendingSnapshot();
       if (snapshotClearTimerRef.current) {
@@ -1241,14 +1328,17 @@ export default function CodexCliRoute() {
       terminalRef.current = null;
       fitAddonRef.current = null;
       serializeAddonRef.current = null;
+      renderAddonRef.current = null;
     };
   }, [
     cancelPendingSnapshot,
+    clearQueuedTerminalOutput,
     closeTransports,
     fitAndNotify,
     markInputTransportStale,
     queueHttpInput,
     queueReconnectInput,
+    queueTerminalOutput,
     requestReconnect,
   ]);
 
