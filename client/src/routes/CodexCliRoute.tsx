@@ -86,6 +86,15 @@ const atomOneLightTheme = {
 const terminalFont =
   '"JetBrainsMono Nerd Font Mono", "JetBrains Mono", "Symbols Nerd Font Mono", "Roboto Mono", "SFMono-Regular", "SF Mono", "Cascadia Code", Menlo, Consolas, "Liberation Mono", monospace';
 const terminalFontSize = 14;
+const terminalScrollbackRows = 10000;
+const terminalSnapshotScrollbackRows = 1500;
+const terminalSnapshotMaxBytes = 512 * 1024;
+const terminalSnapshotMinIntervalMs = 3000;
+const terminalSnapshotSlowMs = 120;
+const terminalSnapshotSlowBackoffMs = 15000;
+const terminalSnapshotTtlMs = 30000;
+const terminalReplayChunkChars = 64 * 1024;
+const terminalRestoreThrottleMs = 250;
 const terminalResponseSuppressMs = 1500;
 const httpInputFlushMs = 8;
 const pendingReconnectInputLimit = 1024 * 1024;
@@ -252,6 +261,46 @@ function isTerminalViewportBlank(terminal: Terminal) {
   return true;
 }
 
+function writeTerminalData(
+  terminal: Terminal,
+  data: string,
+  callback?: () => void,
+) {
+  if (!data || data.length <= terminalReplayChunkChars) {
+    terminal.write(data, callback);
+    return;
+  }
+
+  let offset = 0;
+  const writeNextChunk = () => {
+    const chunk = data.slice(offset, offset + terminalReplayChunkChars);
+    offset += terminalReplayChunkChars;
+    terminal.write(chunk, () => {
+      if (offset >= data.length) {
+        callback?.();
+        return;
+      }
+      window.setTimeout(writeNextChunk, 0);
+    });
+  };
+  writeNextChunk();
+}
+
+function scheduleIdleTask(callback: () => void, timeoutMs: number) {
+  const browserWindow = window as Window & {
+    requestIdleCallback?: (callback: () => void, options?: { timeout: number }) => number;
+    cancelIdleCallback?: (handle: number) => void;
+  };
+
+  if (browserWindow.requestIdleCallback && browserWindow.cancelIdleCallback) {
+    const handle = browserWindow.requestIdleCallback(callback, { timeout: timeoutMs });
+    return () => browserWindow.cancelIdleCallback?.(handle);
+  }
+
+  const handle = window.setTimeout(callback, Math.min(timeoutMs, 1000));
+  return () => window.clearTimeout(handle);
+}
+
 export default function CodexCliRoute() {
   const { sessionId } = useParams();
   const location = useLocation();
@@ -272,6 +321,10 @@ export default function CodexCliRoute() {
   const inputFlushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pendingInputFlushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const snapshotClearTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pendingSnapshotCancelRef = useRef<(() => void) | null>(null);
+  const lastSnapshotAtRef = useRef(0);
+  const skipSnapshotsUntilRef = useRef(0);
   const reconnectCounter = useRef(0);
   const lastSessionIdRef = useRef<string | null>(null);
   const pendingSessionCreateRef = useRef<TerminalMode | null>(null);
@@ -321,25 +374,72 @@ export default function CodexCliRoute() {
   }, [terminalMode]);
 
   const snapshotTerminalState = useCallback(() => {
+    if (typeof document !== 'undefined' && !document.hidden) {
+      return;
+    }
     const terminal = terminalRef.current;
     const serializeAddon = serializeAddonRef.current;
     const key = getTerminalSnapshotKey();
     if (!terminal || !serializeAddon || !key) {
       return;
     }
+    const now = Date.now();
+    if (
+      now - lastSnapshotAtRef.current < terminalSnapshotMinIntervalMs ||
+      now < skipSnapshotsUntilRef.current
+    ) {
+      return;
+    }
+    lastSnapshotAtRef.current = now;
+
     try {
-      const data = serializeAddon.serialize({ scrollback: 50000 });
+      const start = performance.now();
+      let data = serializeAddon.serialize({ scrollback: terminalSnapshotScrollbackRows });
+      if (data.length > terminalSnapshotMaxBytes) {
+        data = serializeAddon.serialize({ scrollback: 0 });
+      }
       if (!data) {
+        return;
+      }
+      if (data.length > terminalSnapshotMaxBytes) {
         return;
       }
       terminalSnapshotRef.current = {
         key,
         data,
       };
+      if (snapshotClearTimerRef.current) {
+        clearTimeout(snapshotClearTimerRef.current);
+      }
+      snapshotClearTimerRef.current = setTimeout(() => {
+        const snapshot = terminalSnapshotRef.current;
+        if (snapshot?.key === key && snapshot.data === data) {
+          terminalSnapshotRef.current = null;
+        }
+        snapshotClearTimerRef.current = null;
+      }, terminalSnapshotTtlMs);
+      if (performance.now() - start > terminalSnapshotSlowMs) {
+        skipSnapshotsUntilRef.current = Date.now() + terminalSnapshotSlowBackoffMs;
+      }
     } catch {
       // Snapshotting is a recovery aid; live PTY streaming remains authoritative.
     }
   }, [getTerminalSnapshotKey]);
+
+  const cancelPendingSnapshot = useCallback(() => {
+    pendingSnapshotCancelRef.current?.();
+    pendingSnapshotCancelRef.current = null;
+  }, []);
+
+  const scheduleTerminalSnapshot = useCallback(() => {
+    if (pendingSnapshotCancelRef.current) {
+      return;
+    }
+    pendingSnapshotCancelRef.current = scheduleIdleTask(() => {
+      pendingSnapshotCancelRef.current = null;
+      snapshotTerminalState();
+    }, 2000);
+  }, [snapshotTerminalState]);
 
   const restoreTerminalSnapshotIfBlank = useCallback(() => {
     const terminal = terminalRef.current;
@@ -356,8 +456,9 @@ export default function CodexCliRoute() {
     }
     try {
       terminal.reset();
-      terminal.write(snapshot.data);
-      terminal.refresh(0, Math.max(0, terminal.rows - 1));
+      writeTerminalData(terminal, snapshot.data, () => {
+        terminal.refresh(0, Math.max(0, terminal.rows - 1));
+      });
       return true;
     } catch {
       return false;
@@ -752,9 +853,14 @@ export default function CodexCliRoute() {
       if (message.type === 'replay') {
         terminal.reset();
         resetBeforeReplayRef.current = false;
-        terminal.write(message.data ?? '', () => {
+        writeTerminalData(terminal, message.data ?? '', () => {
           fitAndNotify();
           terminal.refresh(0, Math.max(0, terminal.rows - 1));
+          terminalSnapshotRef.current = null;
+          if (snapshotClearTimerRef.current) {
+            clearTimeout(snapshotClearTimerRef.current);
+            snapshotClearTimerRef.current = null;
+          }
           if (pendingInputFlushTimerRef.current) {
             clearTimeout(pendingInputFlushTimerRef.current);
             pendingInputFlushTimerRef.current = null;
@@ -1048,7 +1154,7 @@ export default function CodexCliRoute() {
       fontWeight: 400,
       fontWeightBold: 700,
       lineHeight: 1.18,
-      scrollback: 50000,
+      scrollback: terminalScrollbackRows,
       theme: atomOneLightTheme,
       windowsMode: false,
     });
@@ -1125,12 +1231,19 @@ export default function CodexCliRoute() {
       dataDisposable.dispose();
       disposeClipboardHandlers();
       closeTransports();
+      cancelPendingSnapshot();
+      if (snapshotClearTimerRef.current) {
+        clearTimeout(snapshotClearTimerRef.current);
+        snapshotClearTimerRef.current = null;
+      }
+      terminalSnapshotRef.current = null;
       terminal.dispose();
       terminalRef.current = null;
       fitAddonRef.current = null;
       serializeAddonRef.current = null;
     };
   }, [
+    cancelPendingSnapshot,
     closeTransports,
     fitAndNotify,
     markInputTransportStale,
@@ -1144,46 +1257,68 @@ export default function CodexCliRoute() {
   }, [connect, reconnectNonce]);
 
   useEffect(() => {
+    let restoreTimer: ReturnType<typeof setTimeout> | null = null;
+    let restoreFrame = 0;
+    let restoreInnerFrame = 0;
+    let lastRestoreAt = 0;
+
+    const runRestoreTerminal = () => {
+      restoreFrame = 0;
+      restoreInnerFrame = window.requestAnimationFrame(() => {
+        restoreInnerFrame = 0;
+        const terminal = terminalRef.current;
+        if (!terminal || (typeof document !== 'undefined' && document.hidden)) {
+          return;
+        }
+
+        fitAndNotify();
+        terminal.refresh(0, Math.max(0, terminal.rows - 1));
+        const needsReconnect =
+          activeSessionIdRef.current &&
+          !hasExitedRef.current &&
+          (reconnectOnVisibleRef.current || !isTransportUsable());
+        if (!needsReconnect) {
+          restoreTerminalSnapshotIfBlank();
+        }
+        terminal.focus();
+
+        if (transportRef.current === 'sse') {
+          startHttpInputStream();
+        }
+
+        if (needsReconnect) {
+          reconnectOnVisibleRef.current = false;
+          resetBeforeReplayRef.current = true;
+          requestReconnect();
+        }
+      });
+    };
+
     const restoreTerminal = () => {
       if (typeof document !== 'undefined' && document.hidden) {
         return;
       }
+      cancelPendingSnapshot();
 
-      const terminal = terminalRef.current;
-      if (!terminal) {
+      if (!terminalRef.current || restoreTimer || restoreFrame || restoreInnerFrame) {
         return;
       }
 
-      window.requestAnimationFrame(() => {
-        window.requestAnimationFrame(() => {
-          fitAndNotify();
-          terminal.refresh(0, Math.max(0, terminal.rows - 1));
-          restoreTerminalSnapshotIfBlank();
-          terminal.focus();
-
-          if (transportRef.current === 'sse') {
-            startHttpInputStream();
-          }
-
-          if (
-            activeSessionIdRef.current &&
-            !hasExitedRef.current &&
-            (reconnectOnVisibleRef.current || !isTransportUsable())
-          ) {
-            reconnectOnVisibleRef.current = false;
-            resetBeforeReplayRef.current = true;
-            requestReconnect();
-          }
-        });
-      });
+      const delay = Math.max(0, terminalRestoreThrottleMs - (Date.now() - lastRestoreAt));
+      restoreTimer = setTimeout(() => {
+        restoreTimer = null;
+        lastRestoreAt = Date.now();
+        restoreFrame = window.requestAnimationFrame(runRestoreTerminal);
+      }, delay);
     };
 
     const handleVisibilityChange = () => {
       if (document.hidden) {
-        snapshotTerminalState();
+        scheduleTerminalSnapshot();
         closeInputStream();
         return;
       }
+      cancelPendingSnapshot();
       restoreTerminal();
     };
 
@@ -1195,14 +1330,25 @@ export default function CodexCliRoute() {
       document.removeEventListener('visibilitychange', handleVisibilityChange);
       window.removeEventListener('focus', restoreTerminal);
       window.removeEventListener('pageshow', restoreTerminal);
+      if (restoreTimer) {
+        clearTimeout(restoreTimer);
+      }
+      if (restoreFrame) {
+        window.cancelAnimationFrame(restoreFrame);
+      }
+      if (restoreInnerFrame) {
+        window.cancelAnimationFrame(restoreInnerFrame);
+      }
+      cancelPendingSnapshot();
     };
   }, [
+    cancelPendingSnapshot,
     closeInputStream,
     fitAndNotify,
     isTransportUsable,
     requestReconnect,
     restoreTerminalSnapshotIfBlank,
-    snapshotTerminalState,
+    scheduleTerminalSnapshot,
     startHttpInputStream,
   ]);
 

@@ -12,7 +12,8 @@ const DEFAULT_CODEX_HOME = '/home/xieminhui/fjj/.codex';
 const TICKET_TTL_MS = 30_000;
 const TERMINATED_SESSION_TTL_MS = 60_000;
 const MAX_REPLAY_BYTES = 2 * 1024 * 1024;
-const DEFAULT_REPLAY_SCROLLBACK_ROWS = 10000;
+const DEFAULT_REPLAY_SCROLLBACK_ROWS = 3000;
+const COMPACT_REPLAY_SCROLLBACK_ROWS = 500;
 const MAX_ATTACH_BACKLOG_BYTES = 2 * 1024 * 1024;
 const HEARTBEAT_INTERVAL_MS = 30_000;
 const SSE_HEARTBEAT_INTERVAL_MS = 15_000;
@@ -357,9 +358,21 @@ class CodexCliSession {
     }
     try {
       await this.headlessWriteChain;
+      let replayScrollbackRows = getReplayScrollbackRows();
+      let replayData = this.serializeAddon.serialize({ scrollback: replayScrollbackRows });
+      if (
+        Buffer.byteLength(replayData, 'utf8') > MAX_REPLAY_BYTES &&
+        replayScrollbackRows > COMPACT_REPLAY_SCROLLBACK_ROWS
+      ) {
+        replayScrollbackRows = COMPACT_REPLAY_SCROLLBACK_ROWS;
+        replayData = this.serializeAddon.serialize({ scrollback: replayScrollbackRows });
+      }
+      if (Buffer.byteLength(replayData, 'utf8') > MAX_REPLAY_BYTES) {
+        return { type: 'replay', data: this.buffer, seq, replayKind: 'raw-tail' };
+      }
       return {
         type: 'replay',
-        data: this.serializeAddon.serialize({ scrollback: getReplayScrollbackRows() }),
+        data: replayData,
         seq,
         replayKind: 'xterm-serialize',
         cols: this.headlessTerminal.cols,
