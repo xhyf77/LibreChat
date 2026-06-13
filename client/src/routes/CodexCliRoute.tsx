@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useLocation, useNavigate, useParams } from 'react-router-dom';
-import { Terminal } from '@xterm/xterm';
+import { Terminal, type IBufferLine } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { SerializeAddon } from '@xterm/addon-serialize';
 import { WebglAddon } from '@xterm/addon-webgl';
@@ -157,6 +157,8 @@ const pendingReconnectInputFlushMs = 150;
 const pendingReconnectInputLimit = 1024 * 1024;
 const terminalQueryResponsePattern =
   /^(?:\x1b\[[?>]?[0-9;]*[Rc]|\x1b\](?:10|11);rgb:[0-9a-fA-F]{1,4}\/[0-9a-fA-F]{1,4}\/[0-9a-fA-F]{1,4}(?:\x07|\x1b\\))+$/;
+const terminalFileLinePattern =
+  /(^|[\s([{<"'`])((?:(?:\.{1,2}|~)?\/)?(?:[A-Za-z0-9_@.+-]+\/)*[A-Za-z0-9_@.+-]+\.[A-Za-z0-9_+-]+:[1-9][0-9]*(?::[1-9][0-9]*)?)(?=$|[\s)\]}>,"'`])/g;
 const terminalWordSequences = {
   backward: '\x1b[1;5D',
   forward: '\x1b[1;5C',
@@ -378,6 +380,115 @@ function installClipboardHandlers(
 
   container.addEventListener('paste', handlePaste, true);
   return () => container.removeEventListener('paste', handlePaste, true);
+}
+
+function getTerminalLineTextWithColumns(line: IBufferLine, columns: number) {
+  const columnByTextIndex: number[] = [];
+  let text = '';
+
+  for (let column = 0; column < Math.min(columns, line.length); column += 1) {
+    const cell = line.getCell(column);
+    if (!cell || cell.getWidth() === 0) {
+      continue;
+    }
+    const chars = cell.getChars() || ' ';
+    const start = text.length;
+    text += chars;
+    for (let index = start; index < text.length; index += 1) {
+      columnByTextIndex[index] = column;
+    }
+  }
+
+  while (text.endsWith(' ')) {
+    text = text.slice(0, -1);
+  }
+
+  return { text, columnByTextIndex };
+}
+
+function findFileLineSelectionAtColumn(line: IBufferLine, columns: number, column: number) {
+  const { text, columnByTextIndex } = getTerminalLineTextWithColumns(line, columns);
+  terminalFileLinePattern.lastIndex = 0;
+
+  for (const match of text.matchAll(terminalFileLinePattern)) {
+    const token = match[2];
+    if (!token || typeof match.index !== 'number') {
+      continue;
+    }
+    const tokenTextIndex = match.index + match[0].indexOf(token);
+    const tokenEndTextIndex = tokenTextIndex + token.length - 1;
+    const startColumn = columnByTextIndex[tokenTextIndex] ?? tokenTextIndex;
+    const endColumn = (columnByTextIndex[tokenEndTextIndex] ?? tokenEndTextIndex) + 1;
+
+    if (column >= startColumn && column < endColumn) {
+      return {
+        column: startColumn,
+        length: endColumn - startColumn,
+      };
+    }
+  }
+
+  return null;
+}
+
+function getTerminalMouseBufferPosition(terminal: Terminal, event: MouseEvent) {
+  const screenElement = terminal.element?.querySelector('.xterm-screen');
+  if (!(screenElement instanceof HTMLElement)) {
+    return null;
+  }
+  if (event.target instanceof Node && !screenElement.contains(event.target)) {
+    return null;
+  }
+
+  const rect = screenElement.getBoundingClientRect();
+  if (rect.width <= 0 || rect.height <= 0 || terminal.cols <= 0 || terminal.rows <= 0) {
+    return null;
+  }
+
+  const x = event.clientX - rect.left;
+  const y = event.clientY - rect.top;
+  if (x < 0 || y < 0 || x > rect.width || y > rect.height) {
+    return null;
+  }
+
+  const column = Math.max(0, Math.min(terminal.cols - 1, Math.floor((x / rect.width) * terminal.cols)));
+  const viewportRow = Math.max(0, Math.min(terminal.rows - 1, Math.floor((y / rect.height) * terminal.rows)));
+
+  return {
+    column,
+    row: terminal.buffer.active.viewportY + viewportRow,
+  };
+}
+
+function installFileLineSelectionHandler(terminal: Terminal, container: HTMLDivElement) {
+  const handleDoubleClick = (event: MouseEvent) => {
+    if (event.button !== 0 || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) {
+      return;
+    }
+
+    const position = getTerminalMouseBufferPosition(terminal, event);
+    if (!position) {
+      return;
+    }
+
+    const line = terminal.buffer.active.getLine(position.row);
+    if (!line) {
+      return;
+    }
+
+    const selection = findFileLineSelectionAtColumn(line, terminal.cols, position.column);
+    if (!selection) {
+      return;
+    }
+
+    event.preventDefault();
+    window.setTimeout(() => {
+      terminal.select(selection.column, position.row, selection.length);
+    }, 0);
+  };
+
+  container.addEventListener('dblclick', handleDoubleClick, true);
+  return () => container.removeEventListener('dblclick', handleDoubleClick, true);
 }
 
 function isTerminalQueryResponse(data: string) {
@@ -2016,6 +2127,7 @@ export default function CodexCliRoute() {
     };
 
     const disposeClipboardHandlers = installClipboardHandlers(terminal, container, writeInput);
+    const disposeFileLineSelectionHandler = installFileLineSelectionHandler(terminal, container);
     void loadTerminalFonts(terminalFontSize).then(() => {
       if (disposed) {
         return;
@@ -2054,6 +2166,7 @@ export default function CodexCliRoute() {
       resizeObserver.disconnect();
       dataDisposable.dispose();
       disposeClipboardHandlers();
+      disposeFileLineSelectionHandler();
       clearQueuedTerminalOutput();
       resetTerminalWriteQueue();
       closeTransports();
