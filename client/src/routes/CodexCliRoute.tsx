@@ -533,6 +533,23 @@ function writeTerminalData(
   writeNextChunk();
 }
 
+function refreshTerminalGlyphs(terminal: Terminal) {
+  try {
+    terminal.clearTextureAtlas();
+  } catch {
+    // Texture atlas cleanup is best-effort; refresh still helps fallback renderers.
+  }
+  terminal.refresh(0, Math.max(0, terminal.rows - 1));
+  window.requestAnimationFrame(() => {
+    try {
+      terminal.clearTextureAtlas();
+    } catch {
+      // Ignore renderer races during tab restore or addon replacement.
+    }
+    terminal.refresh(0, Math.max(0, terminal.rows - 1));
+  });
+}
+
 function scheduleIdleTask(callback: () => void, timeoutMs: number) {
   const browserWindow = window as Window & {
     requestIdleCallback?: (callback: () => void, options?: { timeout: number }) => number;
@@ -1099,7 +1116,7 @@ export default function CodexCliRoute() {
       renderAddonRef.current = null;
     }
 
-    terminal.refresh(0, Math.max(0, terminal.rows - 1));
+    refreshTerminalGlyphs(terminal);
   }, []);
 
   const startHttpInputStream = useCallback(() => {
@@ -2133,7 +2150,7 @@ export default function CodexCliRoute() {
         return;
       }
       fitAndNotify();
-      terminal.refresh(0, terminal.rows - 1);
+      refreshTerminalGlyphs(terminal);
     });
 
     const dataDisposable = terminal.onData((data) => {
