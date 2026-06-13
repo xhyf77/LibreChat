@@ -11,19 +11,31 @@ const DEFAULT_REPO_PATH = '/srv/work/example-repo';
 const DEFAULT_CODEX_HOME = '/home/connect/.codex';
 const TICKET_TTL_MS = 30_000;
 const TERMINATED_SESSION_TTL_MS = 60_000;
-const MAX_REPLAY_BYTES = 1024 * 1024;
+const MAX_REPLAY_BYTES = 192 * 1024;
 const REPLAY_TRIM_TARGET_BYTES = Math.floor(MAX_REPLAY_BYTES * 0.75);
-const DEFAULT_REPLAY_SCROLLBACK_ROWS = 1500;
-const COMPACT_REPLAY_SCROLLBACK_ROWS = 300;
+const DEFAULT_REPLAY_SCROLLBACK_ROWS = 400;
+const COMPACT_REPLAY_SCROLLBACK_ROWS = 80;
 const MAX_ATTACH_BACKLOG_BYTES = 1024 * 1024;
-const LIVE_OUTPUT_FLUSH_MS = 4;
+const LIVE_OUTPUT_FLUSH_MS = 2;
+const LIVE_OUTPUT_IMMEDIATE_CHARS = 512;
 const LIVE_OUTPUT_FLUSH_CHARS = 64 * 1024;
+const OUTPUT_HISTORY_MAX_BYTES = 1024 * 1024;
 const HEADLESS_WRITE_FLUSH_MS = 16;
 const HEADLESS_WRITE_FLUSH_CHARS = 128 * 1024;
 const HEADLESS_MAX_PENDING_BYTES = 2 * 1024 * 1024;
 const HEADLESS_REPLAY_WAIT_MS = 250;
 const WS_MAX_BUFFERED_BYTES = 2 * 1024 * 1024;
 const SSE_MAX_BUFFERED_BYTES = 2 * 1024 * 1024;
+const SSE_CLIENT_HIGH_WATER_BYTES = 384 * 1024;
+const SSE_CLIENT_LOW_WATER_BYTES = 96 * 1024;
+const SSE_CLIENT_ACK_TIMEOUT_MS = 30_000;
+const MAX_INPUT_BYTES = 64 * 1024;
+const MAX_INPUT_BATCH_BYTES = 128 * 1024;
+const MAX_INPUT_CLIENT_PENDING_BYTES = 1024 * 1024;
+const MAX_INPUT_CLIENT_PENDING_FRAMES = 2048;
+const MAX_INPUT_STREAM_CHUNK_BYTES = 256 * 1024;
+const MAX_INPUT_STREAM_BYTES = 64 * 1024 * 1024;
+const MAX_INPUT_STREAM_LINE_BYTES = 256 * 1024;
 const HEARTBEAT_INTERVAL_MS = 30_000;
 const SSE_HEARTBEAT_INTERVAL_MS = 15_000;
 
@@ -248,12 +260,81 @@ function writeSseMessage(res, message) {
     return false;
   }
   try {
-    const ok = res.write(`data: ${JSON.stringify(message)}\n\n`);
+    const eventId = Number.isSafeInteger(message?.seq) ? `id: ${message.seq}\n` : '';
+    const ok = res.write(`${eventId}data: ${JSON.stringify(message)}\n\n`);
     res.flush?.();
     return ok || res.writableLength <= SSE_MAX_BUFFERED_BYTES;
   } catch {
     return false;
   }
+}
+
+function isValidInputData(data, maxBytes = MAX_INPUT_BYTES) {
+  return typeof data === 'string' && Buffer.byteLength(data, 'utf8') <= maxBytes;
+}
+
+function normalizeResumeSeq(value) {
+  const seq = Number(value);
+  if (!Number.isSafeInteger(seq) || seq <= 0) {
+    return 0;
+  }
+  return seq;
+}
+
+function normalizeInputClientId(value) {
+  if (typeof value !== 'string') {
+    return '';
+  }
+  const trimmed = value.trim();
+  if (!/^[A-Za-z0-9._:-]{1,128}$/.test(trimmed)) {
+    return '';
+  }
+  return trimmed;
+}
+
+function normalizeInputSeq(value) {
+  const seq = Number(value);
+  if (!Number.isSafeInteger(seq) || seq <= 0) {
+    return 0;
+  }
+  return seq;
+}
+
+function normalizeInputFrame(value) {
+  if (!value || typeof value !== 'object') {
+    return null;
+  }
+  const seq = normalizeInputSeq(value.seq);
+  const data = typeof value.data === 'string' ? value.data : null;
+  if (!seq || data == null || !isValidInputData(data)) {
+    return null;
+  }
+  return { seq, data, bytes: Buffer.byteLength(data, 'utf8') };
+}
+
+function normalizeInputBatch(input) {
+  if (!input || typeof input !== 'object') {
+    return null;
+  }
+  const inputClientId = normalizeInputClientId(input.inputClientId);
+  if (!inputClientId) {
+    return null;
+  }
+  const rawFrames = Array.isArray(input.chunks) ? input.chunks : [input];
+  const frames = [];
+  let totalBytes = 0;
+  for (const rawFrame of rawFrames) {
+    const frame = normalizeInputFrame(rawFrame);
+    if (!frame) {
+      return null;
+    }
+    totalBytes += frame.bytes;
+    if (totalBytes > MAX_INPUT_BATCH_BYTES) {
+      return null;
+    }
+    frames.push(frame);
+  }
+  return frames.length > 0 ? { inputClientId, frames } : null;
 }
 
 function timeout(ms) {
@@ -273,11 +354,16 @@ class CodexCliSession {
     this.bufferBytes = 0;
     this.clients = new Set();
     this.eventClients = new Set();
+    this.inputClients = new Map();
+    this.outputPaused = false;
     this.exited = false;
     this.processExited = false;
     this.exitInfo = null;
     this.replaySeq = 0;
+    this.outputHistory = [];
+    this.outputHistoryBytes = 0;
     this.liveOutputBuffer = '';
+    this.liveOutputSeq = 0;
     this.liveOutputTimer = null;
     this.headlessPendingBuffer = '';
     this.headlessPendingBytes = 0;
@@ -315,8 +401,9 @@ class CodexCliSession {
 
     this.ptyProcess.onData((data) => {
       this.appendBuffer(data);
-      this.queueHeadlessWrite(data);
-      this.queueLiveOutput(data);
+      const seq = this.queueHeadlessWrite(data);
+      this.appendOutputHistory(data, seq);
+      this.queueLiveOutput(data, seq);
     });
 
     this.ptyProcess.onExit((event) => {
@@ -361,6 +448,99 @@ class CodexCliSession {
     return this.clients.size > 0 || this.eventClients.size > 0;
   }
 
+  refreshOutputFlowControl() {
+    const shouldPause = [...this.eventClients].some(
+      (client) => !client.closed && client.unackedBytes > SSE_CLIENT_HIGH_WATER_BYTES,
+    );
+    const shouldResume = [...this.eventClients].every(
+      (client) => client.closed || client.unackedBytes < SSE_CLIENT_LOW_WATER_BYTES,
+    );
+
+    if (shouldPause && !this.outputPaused) {
+      this.outputPaused = true;
+      this.ptyProcess.pause?.();
+      return;
+    }
+    if (this.outputPaused && shouldResume) {
+      this.outputPaused = false;
+      this.ptyProcess.resume?.();
+    }
+  }
+
+  ackEventClient(clientId, bytes) {
+    if (!clientId || !Number.isFinite(bytes) || bytes <= 0) {
+      return false;
+    }
+    for (const client of this.eventClients) {
+      if (client.id !== clientId || client.closed) {
+        continue;
+      }
+      client.unackedBytes = Math.max(0, client.unackedBytes - bytes);
+      client.lastAckAt = now();
+      this.refreshOutputFlowControl();
+      return true;
+    }
+    return false;
+  }
+
+  getInputClientState(inputClientId) {
+    let state = this.inputClients.get(inputClientId);
+    if (!state) {
+      state = {
+        lastSeq: 0,
+        pending: new Map(),
+        pendingBytes: 0,
+      };
+      this.inputClients.set(inputClientId, state);
+    }
+    return state;
+  }
+
+  sendInputAck(inputClientId, inputSeq) {
+    if (!inputClientId || !Number.isSafeInteger(inputSeq)) {
+      return;
+    }
+    this.broadcast({ type: 'inputAck', inputClientId, inputSeq });
+  }
+
+  applyInputFrames(inputClientId, frames) {
+    if (!inputClientId || !Array.isArray(frames) || frames.length === 0) {
+      return 0;
+    }
+    const state = this.getInputClientState(inputClientId);
+    for (const frame of frames) {
+      if (!frame || frame.seq <= state.lastSeq || state.pending.has(frame.seq)) {
+        continue;
+      }
+      state.pending.set(frame.seq, {
+        data: frame.data,
+        bytes: frame.bytes ?? Buffer.byteLength(frame.data, 'utf8'),
+      });
+      state.pendingBytes += frame.bytes ?? Buffer.byteLength(frame.data, 'utf8');
+      if (
+        state.pending.size > MAX_INPUT_CLIENT_PENDING_FRAMES ||
+        state.pendingBytes > MAX_INPUT_CLIENT_PENDING_BYTES
+      ) {
+        throw new Error('input_client_backlog_too_large');
+      }
+    }
+
+    let nextSeq = state.lastSeq + 1;
+    while (state.pending.has(nextSeq)) {
+      const nextFrame = state.pending.get(nextSeq);
+      state.pending.delete(nextSeq);
+      state.pendingBytes = Math.max(0, state.pendingBytes - (nextFrame?.bytes || 0));
+      if (nextFrame?.data && !this.exited) {
+        this.write(nextFrame.data);
+      }
+      state.lastSeq = nextSeq;
+      nextSeq += 1;
+    }
+
+    this.sendInputAck(inputClientId, state.lastSeq);
+    return state.lastSeq;
+  }
+
   cancelLiveOutputTimer() {
     if (!this.liveOutputTimer) {
       return;
@@ -372,18 +552,25 @@ class CodexCliSession {
   flushLiveOutput() {
     this.cancelLiveOutputTimer();
     const data = this.liveOutputBuffer;
+    const seq = this.liveOutputSeq || this.replaySeq;
     this.liveOutputBuffer = '';
+    this.liveOutputSeq = 0;
     if (!data || !this.hasLiveClients()) {
       return;
     }
-    this.broadcast({ type: 'data', data });
+    this.broadcast({ type: 'data', data, seq });
   }
 
-  queueLiveOutput(data) {
+  queueLiveOutput(data, seq = this.replaySeq) {
     if (!data || !this.hasLiveClients()) {
+      return;
+    }
+    if (!this.liveOutputBuffer && data.length <= LIVE_OUTPUT_IMMEDIATE_CHARS) {
+      this.broadcast({ type: 'data', data, seq });
       return;
     }
     this.liveOutputBuffer += data;
+    this.liveOutputSeq = seq;
     if (this.liveOutputBuffer.length >= LIVE_OUTPUT_FLUSH_CHARS) {
       this.flushLiveOutput();
       return;
@@ -458,10 +645,23 @@ class CodexCliSession {
     }
   }
 
+  appendOutputHistory(data, seq) {
+    if (!data || !Number.isSafeInteger(seq)) {
+      return;
+    }
+    const bytes = Buffer.byteLength(data, 'utf8');
+    this.outputHistory.push({ seq, data, bytes });
+    this.outputHistoryBytes += bytes;
+    while (this.outputHistoryBytes > OUTPUT_HISTORY_MAX_BYTES && this.outputHistory.length > 0) {
+      const dropped = this.outputHistory.shift();
+      this.outputHistoryBytes -= dropped?.bytes || 0;
+    }
+  }
+
   queueHeadlessWrite(data) {
     this.replaySeq += 1;
     if (!this.headlessTerminal || this.headlessWriteFailed) {
-      return;
+      return this.replaySeq;
     }
     this.headlessPendingBuffer += data;
     this.headlessPendingBytes += Buffer.byteLength(data, 'utf8');
@@ -473,20 +673,21 @@ class CodexCliSession {
       logger.warn('[CodexCliTerminal] Headless terminal disabled after falling behind', {
         sessionId: this.sessionId,
       });
-      return;
+      return this.replaySeq;
     }
     if (this.headlessPendingBytes >= HEADLESS_WRITE_FLUSH_CHARS) {
       this.flushHeadlessWrite();
-      return;
+      return this.replaySeq;
     }
     if (this.headlessFlushTimer) {
-      return;
+      return this.replaySeq;
     }
     this.headlessFlushTimer = setTimeout(() => {
       this.headlessFlushTimer = null;
       this.flushHeadlessWrite();
     }, HEADLESS_WRITE_FLUSH_MS);
     this.headlessFlushTimer.unref?.();
+    return this.replaySeq;
   }
 
   async createReplayMessage() {
@@ -536,6 +737,52 @@ class CodexCliSession {
     }
   }
 
+  getOutputHistoryAfter(afterSeq) {
+    if (!Number.isSafeInteger(afterSeq) || afterSeq <= 0) {
+      return null;
+    }
+    if (afterSeq >= this.replaySeq) {
+      return [];
+    }
+    const first = this.outputHistory[0];
+    if (!first || first.seq > afterSeq + 1) {
+      return null;
+    }
+    const messages = [];
+    for (const record of this.outputHistory) {
+      if (record.seq > afterSeq) {
+        messages.push({ type: 'data', data: record.data, seq: record.seq });
+      }
+    }
+    return messages.length > 0 ? messages : null;
+  }
+
+  startResumeOrReplay(client, send, close, afterSeq = 0) {
+    const resumeMessages = this.getOutputHistoryAfter(afterSeq);
+    if (!resumeMessages) {
+      this.startReplay(client, send, close);
+      return;
+    }
+
+    client.replaying = false;
+    client.replayBacklog = [];
+    client.replayBacklogBytes = 0;
+    for (const message of resumeMessages) {
+      if (client.closed) {
+        return;
+      }
+      if (send(message) === false) {
+        client.closed = true;
+        close();
+        return;
+      }
+    }
+    if (this.exited && this.exitInfo && !client.closed) {
+      send({ type: 'exit', ...this.exitInfo });
+      close();
+    }
+  }
+
   startReplay(client, send, close) {
     client.replaying = true;
     client.replayBacklog = [];
@@ -554,11 +801,11 @@ class CodexCliSession {
         const backlog = client.replayBacklog || [];
         client.replayBacklog = [];
         client.replayBacklogBytes = 0;
-        for (const data of backlog) {
+        for (const backlogMessage of backlog) {
           if (client.closed) {
             return;
           }
-          if (send({ type: 'data', data }) === false) {
+          if (send(backlogMessage) === false) {
             client.closed = true;
             close();
             return;
@@ -589,10 +836,10 @@ class CodexCliSession {
     }
     if (client.replaying && message.type === 'data') {
       const data = message.data ?? '';
-      client.replayBacklog.push(data);
+      client.replayBacklog.push(message);
       client.replayBacklogBytes += Buffer.byteLength(data, 'utf8');
       if (client.replayBacklogBytes > MAX_ATTACH_BACKLOG_BYTES) {
-        client.replayBacklog = [data];
+        client.replayBacklog = [message];
         client.replayBacklogBytes = Buffer.byteLength(data, 'utf8');
       }
       return;
@@ -629,14 +876,19 @@ class CodexCliSession {
     );
   }
 
-  attachEventStream(res) {
+  attachEventStream(res, options = {}) {
+    const afterSeq = normalizeResumeSeq(options.afterSeq);
     const client = {
+      id: crypto.randomBytes(12).toString('base64url'),
       res,
       heartbeatTimer: null,
       closed: false,
       replaying: false,
       replayBacklog: [],
       replayBacklogBytes: 0,
+      unackedBytes: 0,
+      lastAckAt: now(),
+      lastDataAt: 0,
       close: () => {
         if (client.closed) {
           return;
@@ -644,6 +896,7 @@ class CodexCliSession {
         client.closed = true;
         clearInterval(client.heartbeatTimer);
         this.eventClients.delete(client);
+        this.refreshOutputFlowControl();
         if (!res.destroyed) {
           res.end();
         }
@@ -653,7 +906,16 @@ class CodexCliSession {
           client.close();
           return false;
         }
+        const dataBytes =
+          message?.type === 'data' || message?.type === 'replay'
+            ? Buffer.byteLength(message.data ?? '', 'utf8')
+            : 0;
         const ok = writeSseMessage(res, message);
+        if (ok && dataBytes > 0) {
+          client.unackedBytes += dataBytes;
+          client.lastDataAt = now();
+          this.refreshOutputFlowControl();
+        }
         if (!ok && res.writableLength > SSE_MAX_BUFFERED_BYTES) {
           client.close();
         }
@@ -669,6 +931,15 @@ class CodexCliSession {
         return;
       }
       try {
+        const lastProgressAt = Math.max(client.lastAckAt || 0, client.lastDataAt || 0);
+        if (
+          client.unackedBytes > SSE_CLIENT_HIGH_WATER_BYTES &&
+          lastProgressAt &&
+          now() - lastProgressAt > SSE_CLIENT_ACK_TIMEOUT_MS
+        ) {
+          client.close();
+          return;
+        }
         if (res.writableLength > SSE_MAX_BUFFERED_BYTES) {
           client.close();
           return;
@@ -686,10 +957,11 @@ class CodexCliSession {
       mode: this.mode,
       pid: this.ptyProcess.pid,
       cwd: this.repoPath,
+      clientId: client.id,
       serverPid: process.pid,
       serverInstanceId,
     });
-    this.startReplay(client, (message) => client.send(message), () => client.close());
+    this.startResumeOrReplay(client, (message) => client.send(message), () => client.close(), afterSeq);
 
     return client;
   }
@@ -978,7 +1250,13 @@ function terminateCodexCliSession(sessionId, user) {
   return { ok: true, sessionId: normalized, pid, serverPid: process.pid, serverInstanceId };
 }
 
-function attachCodexCliEventStream({ ticket: ticketValue, sessionId: sessionIdValue, mode, res }) {
+function attachCodexCliEventStream({
+  ticket: ticketValue,
+  sessionId: sessionIdValue,
+  mode,
+  afterSeq,
+  res,
+}) {
   res.req?.socket?.setNoDelay?.(true);
   res.req?.socket?.setKeepAlive?.(true, 30_000);
   res.req?.setTimeout?.(0);
@@ -1050,7 +1328,7 @@ function attachCodexCliEventStream({ ticket: ticketValue, sessionId: sessionIdVa
   res.flushHeaders?.();
   res.write(': connected\n\n');
 
-  const client = session.attachEventStream(res);
+  const client = session.attachEventStream(res, { afterSeq });
   const cleanup = () => client.close();
   res.req?.on('close', cleanup);
   res.req?.on('error', cleanup);
@@ -1059,19 +1337,47 @@ function attachCodexCliEventStream({ ticket: ticketValue, sessionId: sessionIdVa
   return { client, session };
 }
 
-function writeCodexCliSessionInput(sessionIdValue, user, data) {
+function writeCodexCliSessionInput(sessionIdValue, user, input) {
   const userId = normalizeUserId(user);
   const sessionId = normalizeSessionId(sessionIdValue);
   if (!userId || !sessionId) {
     return { ok: false, reason: 'invalid_request', serverPid: process.pid, serverInstanceId };
   }
-  if (typeof data !== 'string' || data.length > 65536) {
-    return { ok: false, reason: 'invalid_input', serverPid: process.pid, serverInstanceId };
-  }
   try {
     const session = getActiveSession({ sessionId, userId });
-    session.write(data);
-    return { ok: true, sessionId, serverPid: process.pid, serverInstanceId };
+    if (typeof input === 'string') {
+      if (!isValidInputData(input)) {
+        return { ok: false, reason: 'invalid_input', serverPid: process.pid, serverInstanceId };
+      }
+      session.write(input);
+      return { ok: true, sessionId, serverPid: process.pid, serverInstanceId };
+    }
+    if (
+      input &&
+      typeof input === 'object' &&
+      !input.inputClientId &&
+      typeof input.data === 'string'
+    ) {
+      if (!isValidInputData(input.data)) {
+        return { ok: false, reason: 'invalid_input', serverPid: process.pid, serverInstanceId };
+      }
+      session.write(input.data);
+      return { ok: true, sessionId, serverPid: process.pid, serverInstanceId };
+    }
+
+    const inputBatch = normalizeInputBatch(input);
+    if (!inputBatch) {
+      return { ok: false, reason: 'invalid_input', serverPid: process.pid, serverInstanceId };
+    }
+    const inputAckSeq = session.applyInputFrames(inputBatch.inputClientId, inputBatch.frames);
+    return {
+      ok: true,
+      sessionId,
+      inputClientId: inputBatch.inputClientId,
+      inputAckSeq,
+      serverPid: process.pid,
+      serverInstanceId,
+    };
   } catch (error) {
     return {
       ok: false,
@@ -1108,6 +1414,65 @@ function attachCodexCliInputStream(sessionIdValue, user, req, res) {
   }
 
   const decoder = new StringDecoder('utf8');
+  const inputProtocol = req.headers['x-codex-input-protocol'] === 'jsonl-v1' ? 'jsonl-v1' : 'raw';
+  const inputClientId = normalizeInputClientId(req.headers['x-codex-input-client']);
+  if (inputProtocol === 'jsonl-v1' && !inputClientId) {
+    res.status(400).json({ ok: false, reason: 'invalid_input_client' });
+    return null;
+  }
+  let inputStreamBytes = 0;
+  let inputStreamRejected = false;
+  let inputLineBuffer = '';
+  const rejectInputStream = (status, reason) => {
+    inputStreamRejected = true;
+    if (!res.headersSent) {
+      res.status(status).json({ ok: false, reason });
+    }
+    req.destroy();
+  };
+  const applyInputLine = (line) => {
+    if (!line) {
+      return;
+    }
+    let parsed;
+    try {
+      parsed = JSON.parse(line);
+    } catch {
+      rejectInputStream(400, 'invalid_input_frame');
+      return;
+    }
+    const frame = normalizeInputFrame(parsed);
+    if (!frame) {
+      rejectInputStream(400, 'invalid_input_frame');
+      return;
+    }
+    try {
+      session.applyInputFrames(inputClientId, [frame]);
+    } catch (error) {
+      rejectInputStream(413, error?.message || 'input_client_backlog_too_large');
+    }
+  };
+  const applyInputText = (text) => {
+    if (!text || session.exited || inputStreamRejected) {
+      return;
+    }
+    if (inputProtocol !== 'jsonl-v1') {
+      session.write(text);
+      return;
+    }
+    inputLineBuffer += text;
+    if (Buffer.byteLength(inputLineBuffer, 'utf8') > MAX_INPUT_STREAM_LINE_BYTES) {
+      rejectInputStream(413, 'input_frame_too_large');
+      return;
+    }
+    let newlineIndex = inputLineBuffer.indexOf('\n');
+    while (newlineIndex !== -1 && !inputStreamRejected) {
+      const line = inputLineBuffer.slice(0, newlineIndex);
+      inputLineBuffer = inputLineBuffer.slice(newlineIndex + 1);
+      applyInputLine(line);
+      newlineIndex = inputLineBuffer.indexOf('\n');
+    }
+  };
   const streamLog = {
     sessionId,
     sessionKey: getSessionKey(userId, sessionId),
@@ -1120,21 +1485,43 @@ function attachCodexCliInputStream(sessionIdValue, user, req, res) {
   logger.info(`[CodexCliTerminal] HTTP input stream attach ${formatLogFields(streamLog)}`, streamLog);
 
   req.on('data', (chunk) => {
-    if (session.exited) {
+    if (session.exited || inputStreamRejected) {
       return;
     }
-    const data = decoder.write(chunk);
-    if (data) {
-      session.write(data);
+    inputStreamBytes += chunk.length;
+    if (
+      chunk.length > MAX_INPUT_STREAM_CHUNK_BYTES ||
+      inputStreamBytes > MAX_INPUT_STREAM_BYTES
+    ) {
+      rejectInputStream(413, 'input_stream_too_large');
+      return;
     }
+    applyInputText(decoder.write(chunk));
   });
 
   req.on('end', () => {
-    const data = decoder.end();
-    if (data && !session.exited) {
-      session.write(data);
+    if (inputStreamRejected) {
+      return;
+    }
+    applyInputText(decoder.end());
+    if (inputStreamRejected) {
+      return;
+    }
+    if (inputProtocol === 'jsonl-v1' && inputLineBuffer) {
+      inputLineBuffer = '';
     }
     if (!res.headersSent) {
+      if (inputProtocol === 'jsonl-v1') {
+        const state = session.inputClients.get(inputClientId);
+        res.json({
+          ok: true,
+          inputClientId,
+          inputAckSeq: state?.lastSeq || 0,
+          serverPid: process.pid,
+          serverInstanceId,
+        });
+        return;
+      }
       res.status(204).end();
       return;
     }
@@ -1184,6 +1571,31 @@ function resizeCodexCliSession(sessionIdValue, user, options = {}) {
     return {
       ok: false,
       reason: error?.message || 'unable_to_resize',
+      serverPid: process.pid,
+      serverInstanceId,
+    };
+  }
+}
+
+function ackCodexCliSessionOutput(sessionIdValue, user, options = {}) {
+  const userId = normalizeUserId(user);
+  const sessionId = normalizeSessionId(sessionIdValue);
+  if (!userId || !sessionId) {
+    return { ok: false, reason: 'invalid_request', serverPid: process.pid, serverInstanceId };
+  }
+  const clientId = typeof options.clientId === 'string' ? options.clientId : '';
+  const bytes = Number(options.bytes ?? options.chars);
+  if (!clientId || !Number.isFinite(bytes) || bytes <= 0 || bytes > SSE_MAX_BUFFERED_BYTES) {
+    return { ok: false, reason: 'invalid_ack', serverPid: process.pid, serverInstanceId };
+  }
+  try {
+    const session = getActiveSession({ sessionId, userId });
+    const acked = session.ackEventClient(clientId, bytes);
+    return { ok: acked, sessionId, serverPid: process.pid, serverInstanceId };
+  } catch (error) {
+    return {
+      ok: false,
+      reason: error?.message || 'unable_to_ack',
       serverPid: process.pid,
       serverInstanceId,
     };
@@ -1244,6 +1656,10 @@ function handleWsConnection(ws, _request, params) {
     }
 
     if (message?.type === 'input') {
+      if (!isValidInputData(message.data)) {
+        ws.close(1009, 'Input too large');
+        return;
+      }
       session.write(message.data);
       return;
     }
@@ -1352,6 +1768,7 @@ function attachCodexCliTerminal(server) {
 }
 
 module.exports = {
+  ackCodexCliSessionOutput,
   attachCodexCliEventStream,
   attachCodexCliInputStream,
   attachCodexCliTerminal,

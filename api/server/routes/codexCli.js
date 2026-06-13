@@ -1,6 +1,7 @@
 const express = require('express');
 const requireJwtAuth = require('~/server/middleware/requireJwtAuth');
 const {
+  ackCodexCliSessionOutput,
   attachCodexCliEventStream,
   attachCodexCliInputStream,
   createCodexCliSession,
@@ -26,6 +27,7 @@ router.get('/sessions/:sessionId/events', (req, res) => {
     ticket: req.query.ticket,
     sessionId: req.params.sessionId,
     mode: req.query.mode,
+    afterSeq: req.query.afterSeq,
     res,
   });
   if (!result) {
@@ -69,7 +71,7 @@ router.delete('/sessions/:sessionId', (req, res) => {
 });
 
 router.post('/sessions/:sessionId/input', (req, res) => {
-  const result = writeCodexCliSessionInput(req.params.sessionId, req.user, req.body?.data);
+  const result = writeCodexCliSessionInput(req.params.sessionId, req.user, req.body);
   res.status(result.ok ? 200 : 400).json(result);
 });
 
@@ -81,6 +83,11 @@ router.post('/sessions/:sessionId/input-stream', (req, res) => {
 
 router.post('/sessions/:sessionId/resize', (req, res) => {
   const result = resizeCodexCliSession(req.params.sessionId, req.user, req.body);
+  res.status(result.ok ? 200 : 400).json(result);
+});
+
+router.post('/sessions/:sessionId/ack', (req, res) => {
+  const result = ackCodexCliSessionOutput(req.params.sessionId, req.user, req.body);
   res.status(result.ok ? 200 : 400).json(result);
 });
 
