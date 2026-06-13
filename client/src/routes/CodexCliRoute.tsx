@@ -158,7 +158,7 @@ const pendingReconnectInputLimit = 1024 * 1024;
 const terminalQueryResponsePattern =
   /^(?:\x1b\[[?>]?[0-9;]*[Rc]|\x1b\](?:10|11);rgb:[0-9a-fA-F]{1,4}\/[0-9a-fA-F]{1,4}\/[0-9a-fA-F]{1,4}(?:\x07|\x1b\\))+$/;
 const terminalFileLinePattern =
-  /(^|[\s([{<"'`])((?:(?:\.{1,2}|~)?\/)?(?:[A-Za-z0-9_@.+-]+\/)*[A-Za-z0-9_@.+-]+\.[A-Za-z0-9_+-]+:[1-9][0-9]*(?::[1-9][0-9]*)?)(?=$|[\s)\]}>,"'`])/g;
+  /(^|[\s([{<"'`:;，。；：])((?:(?:\.{1,2}|~)?\/)?(?:[A-Za-z0-9_@.+-]+\/)*[A-Za-z0-9_@.+-]+\.[A-Za-z0-9_+-]+:[1-9][0-9]*(?::[1-9][0-9]*)?)(?=$|[\s)\]}>,"'`:;，。；：])/g;
 const terminalWordSequences = {
   backward: '\x1b[1;5D',
   forward: '\x1b[1;5C',
