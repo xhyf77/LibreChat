@@ -325,11 +325,13 @@ function buildEventSourceUrl({
   sessionId,
   mode,
   afterSeq,
+  replay,
 }: {
   ticket: string;
   sessionId: string;
   mode: TerminalMode;
   afterSeq?: number;
+  replay?: 'none';
 }) {
   const base = apiBaseUrl();
   const path = `${base}/api/codex-cli/sessions/${encodeURIComponent(sessionId)}/events`;
@@ -338,6 +340,9 @@ function buildEventSourceUrl({
   url.searchParams.set('mode', mode);
   if (typeof afterSeq === 'number' && Number.isSafeInteger(afterSeq) && afterSeq > 0) {
     url.searchParams.set('afterSeq', String(afterSeq));
+  }
+  if (replay) {
+    url.searchParams.set('replay', replay);
   }
   return url.toString();
 }
@@ -1976,7 +1981,8 @@ export default function CodexCliRoute() {
         ticket: sseTicketResponse.ticket,
         sessionId: activeSessionId,
         mode: terminalMode,
-        afterSeq: resumeAfterSeq,
+        afterSeq: terminalReplayEnabledRef.current ? resumeAfterSeq : 0,
+        replay: terminalReplayEnabledRef.current ? undefined : 'none',
       });
       const eventSource = new EventSource(url);
       eventSourceRef.current = eventSource;

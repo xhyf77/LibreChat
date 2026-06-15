@@ -28,6 +28,7 @@ router.get('/sessions/:sessionId/events', (req, res) => {
     sessionId: req.params.sessionId,
     mode: req.query.mode,
     afterSeq: req.query.afterSeq,
+    replay: req.query.replay,
     res,
   });
   if (!result) {

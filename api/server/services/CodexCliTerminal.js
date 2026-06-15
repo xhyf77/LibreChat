@@ -16,8 +16,8 @@ const REPLAY_TRIM_TARGET_BYTES = Math.floor(MAX_REPLAY_BYTES * 0.75);
 const DEFAULT_REPLAY_SCROLLBACK_ROWS = 400;
 const COMPACT_REPLAY_SCROLLBACK_ROWS = 80;
 const MAX_ATTACH_BACKLOG_BYTES = 1024 * 1024;
-const LIVE_OUTPUT_FLUSH_MS = 2;
-const LIVE_OUTPUT_IMMEDIATE_CHARS = 512;
+const LIVE_OUTPUT_FLUSH_MS = 16;
+const LIVE_OUTPUT_IMMEDIATE_CHARS = 4096;
 const LIVE_OUTPUT_FLUSH_CHARS = 16 * 1024;
 const OUTPUT_HISTORY_MAX_BYTES = 1024 * 1024;
 const HEADLESS_WRITE_FLUSH_MS = 16;
@@ -28,7 +28,7 @@ const WS_MAX_BUFFERED_BYTES = 2 * 1024 * 1024;
 const SSE_MAX_BUFFERED_BYTES = 2 * 1024 * 1024;
 const SSE_CLIENT_HIGH_WATER_BYTES = 96 * 1024;
 const SSE_CLIENT_LOW_WATER_BYTES = 24 * 1024;
-const SSE_CLIENT_ACK_TIMEOUT_MS = 30_000;
+const SSE_CLIENT_ACK_TIMEOUT_MS = 5_000;
 const MAX_INPUT_BYTES = 64 * 1024;
 const MAX_INPUT_BATCH_BYTES = 128 * 1024;
 const MAX_INPUT_CLIENT_PENDING_BYTES = 1024 * 1024;
@@ -37,7 +37,7 @@ const MAX_INPUT_STREAM_CHUNK_BYTES = 256 * 1024;
 const MAX_INPUT_STREAM_BYTES = 64 * 1024 * 1024;
 const MAX_INPUT_STREAM_LINE_BYTES = 256 * 1024;
 const HEARTBEAT_INTERVAL_MS = 30_000;
-const SSE_HEARTBEAT_INTERVAL_MS = 15_000;
+const SSE_HEARTBEAT_INTERVAL_MS = 3_000;
 
 const tickets = new Map();
 const sessions = new Map();
@@ -279,6 +279,13 @@ function normalizeResumeSeq(value) {
     return 0;
   }
   return seq;
+}
+
+function normalizeReplayMode(value) {
+  if (value === 'none' || value === 'off' || value === 'skip') {
+    return 'none';
+  }
+  return 'full';
 }
 
 function normalizeInputClientId(value) {
@@ -757,9 +764,19 @@ class CodexCliSession {
     return messages.length > 0 ? messages : null;
   }
 
-  startResumeOrReplay(client, send, close, afterSeq = 0) {
+  startResumeOrReplay(client, send, close, afterSeq = 0, replayMode = 'full') {
     const resumeMessages = this.getOutputHistoryAfter(afterSeq);
     if (!resumeMessages) {
+      if (replayMode === 'none') {
+        client.replaying = false;
+        client.replayBacklog = [];
+        client.replayBacklogBytes = 0;
+        if (send({ type: 'replay', data: '', seq: this.replaySeq, replayKind: 'none' }) === false) {
+          client.closed = true;
+          close();
+        }
+        return;
+      }
       this.startReplay(client, send, close);
       return;
     }
@@ -878,6 +895,7 @@ class CodexCliSession {
 
   attachEventStream(res, options = {}) {
     const afterSeq = normalizeResumeSeq(options.afterSeq);
+    const replayMode = normalizeReplayMode(options.replay);
     const client = {
       id: crypto.randomBytes(12).toString('base64url'),
       res,
@@ -931,12 +949,19 @@ class CodexCliSession {
         return;
       }
       try {
-        const lastProgressAt = Math.max(client.lastAckAt || 0, client.lastDataAt || 0);
         if (
           client.unackedBytes > SSE_CLIENT_HIGH_WATER_BYTES &&
-          lastProgressAt &&
-          now() - lastProgressAt > SSE_CLIENT_ACK_TIMEOUT_MS
+          client.lastAckAt &&
+          now() - client.lastAckAt > SSE_CLIENT_ACK_TIMEOUT_MS
         ) {
+          logger.warn('[CodexCliTerminal] Closing slow SSE terminal client', {
+            sessionId: this.sessionId,
+            clientId: client.id,
+            unackedBytes: client.unackedBytes,
+            lastAckAgeMs: now() - client.lastAckAt,
+            serverPid: process.pid,
+            serverInstanceId,
+          });
           client.close();
           return;
         }
@@ -961,7 +986,13 @@ class CodexCliSession {
       serverPid: process.pid,
       serverInstanceId,
     });
-    this.startResumeOrReplay(client, (message) => client.send(message), () => client.close(), afterSeq);
+    this.startResumeOrReplay(
+      client,
+      (message) => client.send(message),
+      () => client.close(),
+      afterSeq,
+      replayMode,
+    );
 
     return client;
   }
@@ -1255,6 +1286,7 @@ function attachCodexCliEventStream({
   sessionId: sessionIdValue,
   mode,
   afterSeq,
+  replay,
   res,
 }) {
   res.req?.socket?.setNoDelay?.(true);
@@ -1328,7 +1360,7 @@ function attachCodexCliEventStream({
   res.flushHeaders?.();
   res.write(': connected\n\n');
 
-  const client = session.attachEventStream(res, { afterSeq });
+  const client = session.attachEventStream(res, { afterSeq, replay });
   const cleanup = () => client.close();
   res.req?.on('close', cleanup);
   res.req?.on('error', cleanup);
