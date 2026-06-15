@@ -261,7 +261,7 @@ function isTerminalReplayEnabled(search: string) {
 
 function isTerminalInputStreamEnabled(search: string) {
   if (typeof window === 'undefined') {
-    return true;
+    return false;
   }
   const query = new URLSearchParams(search);
   const value = query.get('terminalInput');
@@ -273,7 +273,7 @@ function isTerminalInputStreamEnabled(search: string) {
     window.localStorage.setItem(terminalInputStorageKey, 'stream');
     return true;
   }
-  return window.localStorage.getItem(terminalInputStorageKey) !== 'post';
+  return false;
 }
 
 function formatMs(value: number | null) {
