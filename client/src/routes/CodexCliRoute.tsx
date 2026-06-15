@@ -90,6 +90,7 @@ type TerminalDebugMetrics = {
   wsInputChars: number;
   terminalWriteOverflows: number;
   blankRecoveries: number;
+  currentTerminalWritePendingChars: number;
   maxTerminalWritePendingChars: number;
   lastInputAt: number;
   lastEchoMs: number | null;
@@ -133,8 +134,8 @@ const terminalSnapshotMinIntervalMs = 3000;
 const terminalSnapshotSlowMs = 120;
 const terminalSnapshotSlowBackoffMs = 15000;
 const terminalSnapshotTtlMs = 30000;
-const terminalReplayChunkChars = 16 * 1024;
-const terminalLiveWriteFlushChars = 24 * 1024;
+const terminalReplayChunkChars = 8 * 1024;
+const terminalLiveWriteFlushChars = 8 * 1024;
 const terminalLiveDirectWriteChars = 2048;
 const terminalLiveDirectWriteMinIntervalMs = 6;
 const terminalWritePendingMaxChars = 512 * 1024;
@@ -146,8 +147,8 @@ const httpInputFlushMs = 1;
 const httpInputPostMaxBytes = 96 * 1024;
 const httpInputStreamRetryMinMs = 500;
 const httpInputStreamRetryMaxMs = 4000;
-const httpOutputAckFlushMs = 80;
-const httpOutputAckFlushBytes = 64 * 1024;
+const httpOutputAckFlushMs = 40;
+const httpOutputAckFlushBytes = 16 * 1024;
 const websocketFallbackMs = 1800;
 const websocketUnstableCloseMs = 120_000;
 const reconnectMinDelayMs = 150;
@@ -165,6 +166,8 @@ const terminalWordSequences = {
   deleteBackward: '\x17',
 };
 const terminalDebugStorageKey = 'ruc-terminal-debug';
+const terminalWebglStorageKey = 'ruc-terminal-webgl';
+const terminalInputStorageKey = 'ruc-terminal-input';
 const terminalDebugRefreshMs = 1000;
 const terminalBlankRecoveryMinIntervalMs = 1500;
 
@@ -184,6 +187,7 @@ function createTerminalDebugMetrics(): TerminalDebugMetrics {
     wsInputChars: 0,
     terminalWriteOverflows: 0,
     blankRecoveries: 0,
+    currentTerminalWritePendingChars: 0,
     maxTerminalWritePendingChars: 0,
     lastInputAt: 0,
     lastEchoMs: null,
@@ -230,6 +234,46 @@ function isTerminalDebugEnabled(search: string) {
     return false;
   }
   return window.localStorage.getItem(terminalDebugStorageKey) === '1';
+}
+
+function isTerminalWebglEnabled(search: string) {
+  if (typeof window === 'undefined') {
+    return true;
+  }
+  const query = new URLSearchParams(search);
+  const value = query.get('terminalWebgl');
+  if (value === '0' || value === 'false' || value === 'off') {
+    window.localStorage.setItem(terminalWebglStorageKey, '0');
+    return false;
+  }
+  if (value === '1' || value === 'true' || value === 'on') {
+    window.localStorage.setItem(terminalWebglStorageKey, '1');
+    return true;
+  }
+  return window.localStorage.getItem(terminalWebglStorageKey) !== '0';
+}
+
+function isTerminalReplayEnabled(search: string) {
+  const query = new URLSearchParams(search);
+  const value = query.get('terminalReplay');
+  return value !== '0' && value !== 'false' && value !== 'off';
+}
+
+function isTerminalInputStreamEnabled(search: string) {
+  if (typeof window === 'undefined') {
+    return true;
+  }
+  const query = new URLSearchParams(search);
+  const value = query.get('terminalInput');
+  if (value === 'post' || value === 'http-post' || value === 'short') {
+    window.localStorage.setItem(terminalInputStorageKey, 'post');
+    return false;
+  }
+  if (value === 'stream' || value === 'streaming' || value === 'input-stream') {
+    window.localStorage.setItem(terminalInputStorageKey, 'stream');
+    return true;
+  }
+  return window.localStorage.getItem(terminalInputStorageKey) !== 'post';
 }
 
 function formatMs(value: number | null) {
@@ -665,6 +709,24 @@ export default function CodexCliRoute() {
     () => isTerminalDebugEnabled(location.search),
     [location.search],
   );
+  const terminalWebglEnabled = useMemo(
+    () => isTerminalWebglEnabled(location.search),
+    [location.search],
+  );
+  const terminalWebglEnabledRef = useRef(terminalWebglEnabled);
+  terminalWebglEnabledRef.current = terminalWebglEnabled;
+  const terminalReplayEnabled = useMemo(
+    () => isTerminalReplayEnabled(location.search),
+    [location.search],
+  );
+  const terminalReplayEnabledRef = useRef(terminalReplayEnabled);
+  terminalReplayEnabledRef.current = terminalReplayEnabled;
+  const terminalInputStreamEnabled = useMemo(
+    () => isTerminalInputStreamEnabled(location.search),
+    [location.search],
+  );
+  const terminalInputStreamEnabledRef = useRef(terminalInputStreamEnabled);
+  terminalInputStreamEnabledRef.current = terminalInputStreamEnabled;
   const transportPreference = useMemo(
     () => getTerminalTransportPreference(location.search),
     [location.search],
@@ -695,6 +757,11 @@ export default function CodexCliRoute() {
         [
           `transport pref: ${transportPreference}`,
           `live transport: ${transportRef.current ?? '-'}`,
+          `renderer: ${
+            renderAddonRef.current ? 'webgl' : terminalWebglEnabled ? 'default' : 'default (webgl off)'
+          }`,
+          `replay: ${terminalReplayEnabled ? 'on' : 'off'}`,
+          `input mode: ${terminalInputStreamEnabled ? 'stream' : 'post'}`,
           `connected: ${connectedRef.current ? 'yes' : 'no'}`,
           `session: ${activeSessionIdRef.current ?? '-'}`,
           `reconnects: ${metrics.reconnects}`,
@@ -706,7 +773,7 @@ export default function CodexCliRoute() {
           `http stream/post chars: ${metrics.httpStreamChars}/${metrics.httpPostChars}`,
           `http stream retries: ${metrics.httpStreamRetries}`,
           `ws input chars: ${metrics.wsInputChars}`,
-          `xterm pending max: ${metrics.maxTerminalWritePendingChars}`,
+          `xterm pending: ${metrics.currentTerminalWritePendingChars} / max ${metrics.maxTerminalWritePendingChars}`,
           `xterm overflows: ${metrics.terminalWriteOverflows}`,
           `blank recoveries: ${metrics.blankRecoveries}`,
         ].join('\n'),
@@ -716,7 +783,13 @@ export default function CodexCliRoute() {
     updateDebugSnapshot();
     const timer = window.setInterval(updateDebugSnapshot, terminalDebugRefreshMs);
     return () => window.clearInterval(timer);
-  }, [terminalDebugEnabled, transportPreference]);
+  }, [
+    terminalDebugEnabled,
+    terminalInputStreamEnabled,
+    terminalReplayEnabled,
+    terminalWebglEnabled,
+    transportPreference,
+  ]);
 
   const closeInputStream = useCallback(() => {
     const stream = inputStreamRef.current;
@@ -738,6 +811,15 @@ export default function CodexCliRoute() {
       inputStreamRetryTimerRef.current = null;
     }
   }, []);
+
+  useEffect(() => {
+    if (terminalInputStreamEnabled) {
+      return;
+    }
+    closeInputStream();
+    clearHttpInputStreamRetry();
+    inputStreamDisabledRef.current = false;
+  }, [clearHttpInputStreamRetry, closeInputStream, terminalInputStreamEnabled]);
 
   const scheduleHttpInputStreamRetry = useCallback(() => {
     if (hasExitedRef.current || inputStreamRetryTimerRef.current) {
@@ -836,6 +918,7 @@ export default function CodexCliRoute() {
     terminalWriteInFlightRef.current = false;
     terminalWritePendingRef.current = '';
     terminalWritePendingCallbacksRef.current = [];
+    terminalDebugMetricsRef.current.currentTerminalWritePendingChars = 0;
   }, []);
 
   const writeTerminalOutput = useCallback((data: string, callback?: () => void) => {
@@ -847,6 +930,8 @@ export default function CodexCliRoute() {
 
     if (terminalWriteInFlightRef.current) {
       terminalWritePendingRef.current += data;
+      terminalDebugMetricsRef.current.currentTerminalWritePendingChars =
+        terminalWritePendingRef.current.length;
       if (callback) {
         terminalWritePendingCallbacksRef.current.push(callback);
       }
@@ -858,6 +943,7 @@ export default function CodexCliRoute() {
         terminalDebugMetricsRef.current.terminalWriteOverflows += 1;
         terminalWritePendingRef.current = '';
         terminalWritePendingCallbacksRef.current = [];
+        terminalDebugMetricsRef.current.currentTerminalWritePendingChars = 0;
         resetBeforeReplayRef.current = true;
         requestReconnectRef.current();
       }
@@ -877,6 +963,7 @@ export default function CodexCliRoute() {
       const pendingCallbacks = terminalWritePendingCallbacksRef.current;
       terminalWritePendingRef.current = '';
       terminalWritePendingCallbacksRef.current = [];
+      terminalDebugMetricsRef.current.currentTerminalWritePendingChars = 0;
       if (pending) {
         window.setTimeout(() => {
           writeTerminalOutputRef.current(pending, () => {
@@ -1095,6 +1182,7 @@ export default function CodexCliRoute() {
       !terminal ||
       !activeSessionIdRef.current ||
       hasExitedRef.current ||
+      !terminalReplayEnabledRef.current ||
       !isTerminalViewportBlank(terminal)
     ) {
       return false;
@@ -1116,13 +1204,7 @@ export default function CodexCliRoute() {
     return true;
   }, [restoreTerminalSnapshotIfBlank]);
 
-  const resetTerminalRenderer = useCallback(() => {
-    const terminal = terminalRef.current;
-    if (!terminal) {
-      return;
-    }
-    const viewportSnapshot = captureTerminalViewport(terminal);
-
+  const setTerminalRendererMode = useCallback((terminal: Terminal, enableWebgl: boolean) => {
     const currentRenderAddon = renderAddonRef.current;
     if (currentRenderAddon) {
       renderAddonRef.current = null;
@@ -1131,6 +1213,11 @@ export default function CodexCliRoute() {
       } catch {
         // Best-effort renderer recovery; xterm falls back to its default renderer.
       }
+    }
+
+    if (!enableWebgl) {
+      renderAddonRef.current = null;
+      return;
     }
 
     try {
@@ -1147,10 +1234,18 @@ export default function CodexCliRoute() {
     } catch {
       renderAddonRef.current = null;
     }
+  }, []);
 
+  const resetTerminalRenderer = useCallback(() => {
+    const terminal = terminalRef.current;
+    if (!terminal) {
+      return;
+    }
+    const viewportSnapshot = captureTerminalViewport(terminal);
+    setTerminalRendererMode(terminal, terminalWebglEnabled);
     refreshTerminalGlyphs(terminal);
     restoreTerminalViewport(terminal, viewportSnapshot);
-  }, []);
+  }, [setTerminalRendererMode, terminalWebglEnabled]);
 
   const startHttpInputStream = useCallback(() => {
     const session = activeSessionIdRef.current;
@@ -1158,6 +1253,7 @@ export default function CodexCliRoute() {
       !session ||
       !token ||
       hasExitedRef.current ||
+      !terminalInputStreamEnabledRef.current ||
       inputStreamRef.current ||
       inputStreamDisabledRef.current ||
       typeof ReadableStream === 'undefined' ||
@@ -1507,12 +1603,16 @@ export default function CodexCliRoute() {
   const queueHttpInput = useCallback(
     (data: string) => {
       const chunk = createInputChunk(data);
-      if (!inputStreamRef.current && !inputStreamDisabledRef.current) {
+      if (
+        terminalInputStreamEnabledRef.current &&
+        !inputStreamRef.current &&
+        !inputStreamDisabledRef.current
+      ) {
         startHttpInputStream();
       }
 
       const inputStream = inputStreamRef.current;
-      if (inputStream && !inputStream.closed) {
+      if (terminalInputStreamEnabledRef.current && inputStream && !inputStream.closed) {
         try {
           inputStream.controller.enqueue(inputStream.encoder.encode(encodeInputChunk(chunk)));
           terminalDebugMetricsRef.current.httpStreamChars += data.length;
@@ -1746,6 +1846,19 @@ export default function CodexCliRoute() {
         resetTerminalWriteQueue();
         terminal.reset();
         resetBeforeReplayRef.current = false;
+        if (!terminalReplayEnabledRef.current) {
+          markOutputApplied(message.seq);
+          sendOutputAckRef.current(getTerminalOutputBytes(replayData));
+          terminal.writeln('[terminal replay skipped]');
+          fitAndNotify();
+          terminal.refresh(0, Math.max(0, terminal.rows - 1));
+          terminalSnapshotRef.current = null;
+          if (snapshotClearTimerRef.current) {
+            clearTimeout(snapshotClearTimerRef.current);
+            snapshotClearTimerRef.current = null;
+          }
+          return;
+        }
         writeTerminalOutputRef.current(replayData, () => {
           markOutputApplied(message.seq);
           sendOutputAckRef.current(getTerminalOutputBytes(replayData));
@@ -2133,20 +2246,7 @@ export default function CodexCliRoute() {
     terminal.loadAddon(fitAddon);
     terminal.loadAddon(serializeAddon);
     terminal.open(container);
-    try {
-      const renderAddon = new WebglAddon();
-      renderAddon.onContextLoss(() => {
-        if (renderAddonRef.current === renderAddon) {
-          renderAddonRef.current = null;
-        }
-        renderAddon.dispose();
-        terminal.refresh(0, Math.max(0, terminal.rows - 1));
-      });
-      terminal.loadAddon(renderAddon);
-      renderAddonRef.current = renderAddon;
-    } catch {
-      renderAddonRef.current = null;
-    }
+    setTerminalRendererMode(terminal, terminalWebglEnabledRef.current);
     terminalRef.current = terminal;
     fitAddonRef.current = fitAddon;
     serializeAddonRef.current = serializeAddon;
@@ -2247,7 +2347,23 @@ export default function CodexCliRoute() {
     queueTerminalOutput,
     requestReconnect,
     resetTerminalWriteQueue,
+    setTerminalRendererMode,
   ]);
+
+  useEffect(() => {
+    const terminal = terminalRef.current;
+    if (!terminal) {
+      return;
+    }
+    if (terminalWebglEnabled === !!renderAddonRef.current) {
+      return;
+    }
+
+    const viewportSnapshot = captureTerminalViewport(terminal);
+    setTerminalRendererMode(terminal, terminalWebglEnabled);
+    refreshTerminalGlyphs(terminal);
+    restoreTerminalViewport(terminal, viewportSnapshot);
+  }, [setTerminalRendererMode, terminalWebglEnabled]);
 
   useEffect(() => {
     connect();
