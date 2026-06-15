@@ -139,7 +139,7 @@ const terminalLiveDirectWriteChars = 2048;
 const terminalLiveDirectWriteMinIntervalMs = 6;
 const terminalWritePendingMaxChars = 512 * 1024;
 const terminalHiddenBacklogMaxChars = 256 * 1024;
-const terminalHiddenForceReplayMs = 30_000;
+const terminalHiddenForceReplayMs = 5 * 60_000;
 const terminalRestoreThrottleMs = 250;
 const terminalResponseSuppressMs = 1500;
 const httpInputFlushMs = 1;
@@ -533,6 +533,33 @@ function writeTerminalData(
   writeNextChunk();
 }
 
+function captureTerminalViewport(terminal: Terminal) {
+  const buffer = terminal.buffer.active;
+  return {
+    viewportY: buffer.viewportY,
+    baseY: buffer.baseY,
+    offsetFromBottom: Math.max(0, buffer.baseY - buffer.viewportY),
+    atBottom: buffer.viewportY >= buffer.baseY,
+  };
+}
+
+function restoreTerminalViewport(
+  terminal: Terminal,
+  snapshot: ReturnType<typeof captureTerminalViewport> | null,
+) {
+  if (!snapshot || snapshot.atBottom) {
+    return;
+  }
+
+  const buffer = terminal.buffer.active;
+  const targetLine =
+    buffer.baseY >= snapshot.baseY
+      ? Math.min(snapshot.viewportY, buffer.baseY)
+      : Math.max(0, buffer.baseY - snapshot.offsetFromBottom);
+  terminal.scrollToLine(targetLine);
+  terminal.refresh(0, Math.max(0, terminal.rows - 1));
+}
+
 function refreshTerminalGlyphs(terminal: Terminal) {
   try {
     terminal.clearTextureAtlas();
@@ -864,7 +891,7 @@ export default function CodexCliRoute() {
 
   writeTerminalOutputRef.current = writeTerminalOutput;
 
-  const flushQueuedTerminalOutput = useCallback(() => {
+  const flushQueuedTerminalOutput = useCallback((afterFlush?: () => void) => {
     cancelQueuedTerminalOutput();
     const data = terminalOutputBufferRef.current;
     const ackBytes = terminalOutputAckBytesRef.current;
@@ -873,11 +900,13 @@ export default function CodexCliRoute() {
     terminalOutputAckBytesRef.current = 0;
     terminalOutputSeqRef.current = 0;
     if (!data) {
+      afterFlush?.();
       return;
     }
     writeTerminalOutputRef.current(data, () => {
       markOutputApplied(outputSeq);
       sendOutputAckRef.current(ackBytes || getTerminalOutputBytes(data));
+      afterFlush?.();
     });
   }, [cancelQueuedTerminalOutput, markOutputApplied]);
 
@@ -1047,10 +1076,12 @@ export default function CodexCliRoute() {
       return false;
     }
     try {
+      const viewportSnapshot = captureTerminalViewport(terminal);
       resetTerminalWriteQueue();
       terminal.reset();
       writeTerminalOutputRef.current(snapshot.data, () => {
         terminal.refresh(0, Math.max(0, terminal.rows - 1));
+        restoreTerminalViewport(terminal, viewportSnapshot);
       });
       return true;
     } catch {
@@ -1090,6 +1121,7 @@ export default function CodexCliRoute() {
     if (!terminal) {
       return;
     }
+    const viewportSnapshot = captureTerminalViewport(terminal);
 
     const currentRenderAddon = renderAddonRef.current;
     if (currentRenderAddon) {
@@ -1117,6 +1149,7 @@ export default function CodexCliRoute() {
     }
 
     refreshTerminalGlyphs(terminal);
+    restoreTerminalViewport(terminal, viewportSnapshot);
   }, []);
 
   const startHttpInputStream = useCallback(() => {
@@ -1703,6 +1736,7 @@ export default function CodexCliRoute() {
 
       if (message.type === 'replay') {
         const replayData = message.data ?? '';
+        const viewportSnapshot = captureTerminalViewport(terminal);
         if (pendingInputFlushTimerRef.current) {
           clearTimeout(pendingInputFlushTimerRef.current);
           pendingInputFlushTimerRef.current = null;
@@ -1717,6 +1751,7 @@ export default function CodexCliRoute() {
           sendOutputAckRef.current(getTerminalOutputBytes(replayData));
           fitAndNotify();
           terminal.refresh(0, Math.max(0, terminal.rows - 1));
+          restoreTerminalViewport(terminal, viewportSnapshot);
           terminalSnapshotRef.current = null;
           if (snapshotClearTimerRef.current) {
             clearTimeout(snapshotClearTimerRef.current);
@@ -1736,10 +1771,12 @@ export default function CodexCliRoute() {
           metrics.lastInputAt = 0;
         }
         if (resetBeforeReplayRef.current) {
+          const viewportSnapshot = captureTerminalViewport(terminal);
           clearQueuedTerminalOutput();
           resetTerminalWriteQueue();
           terminal.reset();
           resetBeforeReplayRef.current = false;
+          restoreTerminalViewport(terminal, viewportSnapshot);
         }
         queueTerminalOutput(data, message.seq);
         return;
@@ -2231,24 +2268,31 @@ export default function CodexCliRoute() {
           return;
         }
 
-        flushQueuedTerminalOutput();
-        fitAndNotify();
-        terminal.refresh(0, Math.max(0, terminal.rows - 1));
-        const needsReconnect =
-          activeSessionIdRef.current &&
-          !hasExitedRef.current &&
-          (reconnectOnVisibleRef.current || !isTransportUsable());
-        const recoveredBlankTerminal = recoverBlankTerminal();
-        terminal.focus();
+        const viewportSnapshot = captureTerminalViewport(terminal);
+        flushQueuedTerminalOutput(() => {
+          if (terminalRef.current !== terminal || (typeof document !== 'undefined' && document.hidden)) {
+            return;
+          }
 
-        if (transportRef.current === 'sse') {
-          startHttpInputStream();
-        }
+          fitAndNotify();
+          terminal.refresh(0, Math.max(0, terminal.rows - 1));
+          restoreTerminalViewport(terminal, viewportSnapshot);
+          const needsReconnect =
+            activeSessionIdRef.current &&
+            !hasExitedRef.current &&
+            (reconnectOnVisibleRef.current || !isTransportUsable());
+          const recoveredBlankTerminal = recoverBlankTerminal();
+          terminal.focus();
 
-        if (needsReconnect && !recoveredBlankTerminal) {
-          reconnectOnVisibleRef.current = false;
-          requestReconnect();
-        }
+          if (transportRef.current === 'sse') {
+            startHttpInputStream();
+          }
+
+          if (needsReconnect && !recoveredBlankTerminal) {
+            reconnectOnVisibleRef.current = false;
+            requestReconnect();
+          }
+        });
       });
     };
 
