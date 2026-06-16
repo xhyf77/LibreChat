@@ -256,7 +256,7 @@ function isTerminalWebglEnabled(search: string) {
 function isTerminalReplayEnabled(search: string) {
   const query = new URLSearchParams(search);
   const value = query.get('terminalReplay');
-  return value !== '0' && value !== 'false' && value !== 'off';
+  return value === '1' || value === 'true' || value === 'on' || value === 'full';
 }
 
 function isTerminalInputStreamEnabled(search: string) {
