@@ -58,6 +58,13 @@ const routes = require('./routes');
 const { PORT, HOST, LISTEN_SOCKET, ALLOW_SOCIAL_LOGIN, DISABLE_COMPRESSION, TRUST_PROXY } =
   process.env ?? {};
 
+function shouldCompressResponse(req, res) {
+  if (req.path?.startsWith('/api/codex-cli/') && req.path?.endsWith('/events')) {
+    return false;
+  }
+  return compression.filter(req, res);
+}
+
 // Allow PORT=0 to be used for automatic free port assignment
 const port = isNaN(Number(PORT)) ? 3080 : Number(PORT);
 const host = HOST || 'localhost';
@@ -202,7 +209,7 @@ const startServer = async () => {
   app.use(cookieParser());
 
   if (!isEnabled(DISABLE_COMPRESSION)) {
-    app.use(compression());
+    app.use(compression({ filter: shouldCompressResponse }));
   } else {
     console.warn('Response compression has been disabled via DISABLE_COMPRESSION.');
   }

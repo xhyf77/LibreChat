@@ -17,8 +17,8 @@ const DEFAULT_REPLAY_SCROLLBACK_ROWS = 400;
 const COMPACT_REPLAY_SCROLLBACK_ROWS = 80;
 const MAX_ATTACH_BACKLOG_BYTES = 1024 * 1024;
 const LIVE_OUTPUT_FLUSH_MS = 16;
-const LIVE_OUTPUT_IMMEDIATE_CHARS = 4096;
-const LIVE_OUTPUT_FLUSH_CHARS = 16 * 1024;
+const LIVE_OUTPUT_IMMEDIATE_CHARS = 1024;
+const LIVE_OUTPUT_FLUSH_CHARS = 4 * 1024;
 const OUTPUT_HISTORY_MAX_BYTES = 1024 * 1024;
 const HEADLESS_WRITE_FLUSH_MS = 16;
 const HEADLESS_WRITE_FLUSH_CHARS = 128 * 1024;
@@ -27,8 +27,11 @@ const HEADLESS_REPLAY_WAIT_MS = 250;
 const WS_MAX_BUFFERED_BYTES = 2 * 1024 * 1024;
 const SSE_MAX_BUFFERED_BYTES = 2 * 1024 * 1024;
 const SSE_CLIENT_HIGH_WATER_BYTES = 96 * 1024;
-const SSE_CLIENT_LOW_WATER_BYTES = 24 * 1024;
+const SSE_CLIENT_CLOSE_BYTES = 256 * 1024;
 const SSE_CLIENT_ACK_TIMEOUT_MS = 5_000;
+const SSE_REPLAY_MAX_BYTES = 64 * 1024;
+const SSE_RESUME_MAX_BYTES = 64 * 1024;
+const SSE_ATTACH_BACKLOG_MAX_BYTES = 96 * 1024;
 const MAX_INPUT_BYTES = 64 * 1024;
 const MAX_INPUT_BATCH_BYTES = 128 * 1024;
 const MAX_INPUT_CLIENT_PENDING_BYTES = 1024 * 1024;
@@ -240,6 +243,14 @@ function formatLogFields(fields) {
     .filter(([, value]) => value !== undefined && value !== null)
     .map(([key, value]) => `${key}=${value}`)
     .join(' ');
+}
+
+function trimUtf8Tail(data, maxBytes) {
+  if (!data || Buffer.byteLength(data, 'utf8') <= maxBytes) {
+    return data;
+  }
+  const buffer = Buffer.from(data, 'utf8');
+  return buffer.subarray(Math.max(0, buffer.length - maxBytes)).toString('utf8');
 }
 
 function serializeSession(session) {
@@ -456,19 +467,7 @@ class CodexCliSession {
   }
 
   refreshOutputFlowControl() {
-    const shouldPause = [...this.eventClients].some(
-      (client) => !client.closed && client.unackedBytes > SSE_CLIENT_HIGH_WATER_BYTES,
-    );
-    const shouldResume = [...this.eventClients].every(
-      (client) => client.closed || client.unackedBytes < SSE_CLIENT_LOW_WATER_BYTES,
-    );
-
-    if (shouldPause && !this.outputPaused) {
-      this.outputPaused = true;
-      this.ptyProcess.pause?.();
-      return;
-    }
-    if (this.outputPaused && shouldResume) {
+    if (this.outputPaused) {
       this.outputPaused = false;
       this.ptyProcess.resume?.();
     }
@@ -697,10 +696,10 @@ class CodexCliSession {
     return this.replaySeq;
   }
 
-  async createReplayMessage() {
+  async createReplayMessage(maxBytes = MAX_REPLAY_BYTES) {
     const seq = this.replaySeq;
     if (!this.headlessTerminal || !this.serializeAddon || this.headlessWriteFailed) {
-      return { type: 'replay', data: this.buffer, seq, replayKind: 'raw-tail' };
+      return { type: 'replay', data: trimUtf8Tail(this.buffer, maxBytes), seq, replayKind: 'raw-tail' };
     }
     try {
       this.flushHeadlessWrite();
@@ -712,19 +711,19 @@ class CodexCliSession {
         }),
       ]);
       if (timedOut) {
-        return { type: 'replay', data: this.buffer, seq, replayKind: 'raw-tail' };
+        return { type: 'replay', data: trimUtf8Tail(this.buffer, maxBytes), seq, replayKind: 'raw-tail' };
       }
       let replayScrollbackRows = getReplayScrollbackRows();
       let replayData = this.serializeAddon.serialize({ scrollback: replayScrollbackRows });
       if (
-        Buffer.byteLength(replayData, 'utf8') > MAX_REPLAY_BYTES &&
+        Buffer.byteLength(replayData, 'utf8') > maxBytes &&
         replayScrollbackRows > COMPACT_REPLAY_SCROLLBACK_ROWS
       ) {
         replayScrollbackRows = COMPACT_REPLAY_SCROLLBACK_ROWS;
         replayData = this.serializeAddon.serialize({ scrollback: replayScrollbackRows });
       }
-      if (Buffer.byteLength(replayData, 'utf8') > MAX_REPLAY_BYTES) {
-        return { type: 'replay', data: this.buffer, seq, replayKind: 'raw-tail' };
+      if (Buffer.byteLength(replayData, 'utf8') > maxBytes) {
+        return { type: 'replay', data: trimUtf8Tail(this.buffer, maxBytes), seq, replayKind: 'raw-tail' };
       }
       return {
         type: 'replay',
@@ -740,7 +739,7 @@ class CodexCliSession {
         sessionId: this.sessionId,
         error: error?.message ?? error,
       });
-      return { type: 'replay', data: this.buffer, seq, replayKind: 'raw-tail' };
+      return { type: 'replay', data: trimUtf8Tail(this.buffer, maxBytes), seq, replayKind: 'raw-tail' };
     }
   }
 
@@ -764,7 +763,7 @@ class CodexCliSession {
     return messages.length > 0 ? messages : null;
   }
 
-  startResumeOrReplay(client, send, close, afterSeq = 0, replayMode = 'full') {
+  startResumeOrReplay(client, send, close, afterSeq = 0, replayMode = 'full', options = {}) {
     const resumeMessages = this.getOutputHistoryAfter(afterSeq);
     if (!resumeMessages) {
       if (replayMode === 'none') {
@@ -777,13 +776,29 @@ class CodexCliSession {
         }
         return;
       }
-      this.startReplay(client, send, close);
+      this.startReplay(client, send, close, options);
       return;
     }
 
     client.replaying = false;
     client.replayBacklog = [];
     client.replayBacklogBytes = 0;
+    const maxResumeBytes = options.maxResumeBytes ?? Number.POSITIVE_INFINITY;
+    const resumeBytes = resumeMessages.reduce(
+      (total, message) => total + Buffer.byteLength(message.data ?? '', 'utf8'),
+      0,
+    );
+    if (resumeBytes > maxResumeBytes) {
+      if (replayMode === 'none') {
+        if (send({ type: 'replay', data: '', seq: this.replaySeq, replayKind: 'none' }) === false) {
+          client.closed = true;
+          close();
+        }
+        return;
+      }
+      this.startReplay(client, send, close, options);
+      return;
+    }
     for (const message of resumeMessages) {
       if (client.closed) {
         return;
@@ -800,11 +815,11 @@ class CodexCliSession {
     }
   }
 
-  startReplay(client, send, close) {
+  startReplay(client, send, close, options = {}) {
     client.replaying = true;
     client.replayBacklog = [];
     client.replayBacklogBytes = 0;
-    void this.createReplayMessage()
+    void this.createReplayMessage(options.maxReplayBytes ?? MAX_REPLAY_BYTES)
       .then((message) => {
         if (client.closed) {
           return;
@@ -840,7 +855,14 @@ class CodexCliSession {
         });
         if (!client.closed) {
           client.replaying = false;
-          if (send({ type: 'replay', data: this.buffer, seq: this.replaySeq, replayKind: 'raw-tail' }) === false) {
+          if (
+            send({
+              type: 'replay',
+              data: trimUtf8Tail(this.buffer, options.maxReplayBytes ?? MAX_REPLAY_BYTES),
+              seq: this.replaySeq,
+              replayKind: 'raw-tail',
+            }) === false
+          ) {
             client.closed = true;
           }
         }
@@ -855,7 +877,7 @@ class CodexCliSession {
       const data = message.data ?? '';
       client.replayBacklog.push(message);
       client.replayBacklogBytes += Buffer.byteLength(data, 'utf8');
-      if (client.replayBacklogBytes > MAX_ATTACH_BACKLOG_BYTES) {
+      if (client.replayBacklogBytes > (client.maxReplayBacklogBytes ?? MAX_ATTACH_BACKLOG_BYTES)) {
         client.replayBacklog = [message];
         client.replayBacklogBytes = Buffer.byteLength(data, 'utf8');
       }
@@ -896,6 +918,22 @@ class CodexCliSession {
   attachEventStream(res, options = {}) {
     const afterSeq = normalizeResumeSeq(options.afterSeq);
     const replayMode = normalizeReplayMode(options.replay);
+    for (const existingClient of [...this.eventClients]) {
+      const shouldCloseExisting =
+        !existingClient.closed &&
+        (existingClient.replaying || existingClient.unackedBytes > 0 || existingClient.res?.destroyed);
+      if (shouldCloseExisting) {
+        logger.info('[CodexCliTerminal] Closing lagging SSE terminal client before attach', {
+          sessionId: this.sessionId,
+          clientId: existingClient.id,
+          unackedBytes: existingClient.unackedBytes,
+          replaying: existingClient.replaying,
+          serverPid: process.pid,
+          serverInstanceId,
+        });
+        existingClient.close();
+      }
+    }
     const client = {
       id: crypto.randomBytes(12).toString('base64url'),
       res,
@@ -904,6 +942,7 @@ class CodexCliSession {
       replaying: false,
       replayBacklog: [],
       replayBacklogBytes: 0,
+      maxReplayBacklogBytes: SSE_ATTACH_BACKLOG_MAX_BYTES,
       unackedBytes: 0,
       lastAckAt: now(),
       lastDataAt: 0,
@@ -932,6 +971,20 @@ class CodexCliSession {
         if (ok && dataBytes > 0) {
           client.unackedBytes += dataBytes;
           client.lastDataAt = now();
+          if (client.unackedBytes > SSE_CLIENT_CLOSE_BYTES) {
+            logger.warn('[CodexCliTerminal] Closing overloaded SSE terminal client', {
+              sessionId: this.sessionId,
+              clientId: client.id,
+              unackedBytes: client.unackedBytes,
+              dataBytes,
+              writableLength: res.writableLength,
+              replaying: client.replaying,
+              serverPid: process.pid,
+              serverInstanceId,
+            });
+            client.close();
+            return false;
+          }
           this.refreshOutputFlowControl();
         }
         if (!ok && res.writableLength > SSE_MAX_BUFFERED_BYTES) {
@@ -969,7 +1022,11 @@ class CodexCliSession {
           client.close();
           return;
         }
-        res.write(': keepalive\n\n');
+        const ok = res.write(': keepalive\n\n');
+        res.flush?.();
+        if (!ok && res.writableLength > SSE_MAX_BUFFERED_BYTES) {
+          client.close();
+        }
       } catch {
         client.close();
       }
@@ -992,6 +1049,10 @@ class CodexCliSession {
       () => client.close(),
       afterSeq,
       replayMode,
+      {
+        maxReplayBytes: SSE_REPLAY_MAX_BYTES,
+        maxResumeBytes: SSE_RESUME_MAX_BYTES,
+      },
     );
 
     return client;
