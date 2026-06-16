@@ -134,11 +134,11 @@ const terminalSnapshotMinIntervalMs = 3000;
 const terminalSnapshotSlowMs = 120;
 const terminalSnapshotSlowBackoffMs = 15000;
 const terminalSnapshotTtlMs = 30000;
-const terminalReplayChunkChars = 8 * 1024;
-const terminalLiveWriteFlushChars = 8 * 1024;
-const terminalLiveDirectWriteChars = 2048;
+const terminalReplayChunkChars = 4 * 1024;
+const terminalLiveWriteFlushChars = 4 * 1024;
+const terminalLiveDirectWriteChars = 1024;
 const terminalLiveDirectWriteMinIntervalMs = 6;
-const terminalWritePendingMaxChars = 512 * 1024;
+const terminalWritePendingMaxChars = 128 * 1024;
 const terminalHiddenBacklogMaxChars = 256 * 1024;
 const terminalHiddenForceReplayMs = 5 * 60_000;
 const terminalRestoreThrottleMs = 250;
@@ -576,7 +576,7 @@ function writeTerminalData(
         callback?.();
         return;
       }
-      window.setTimeout(writeNextChunk, 0);
+      window.requestAnimationFrame(writeNextChunk);
     });
   };
   writeNextChunk();
@@ -1063,7 +1063,7 @@ export default function CodexCliRoute() {
       terminalOutputAckBytesRef.current += getTerminalOutputBytes(data);
       terminalOutputSeqRef.current = Math.max(terminalOutputSeqRef.current, outputSeq);
       if (terminalOutputBufferRef.current.length >= terminalLiveWriteFlushChars) {
-        flushQueuedTerminalOutput();
+        scheduleQueuedTerminalOutput();
         return;
       }
       scheduleQueuedTerminalOutput();
