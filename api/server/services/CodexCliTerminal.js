@@ -41,6 +41,62 @@ const MAX_INPUT_STREAM_BYTES = 64 * 1024 * 1024;
 const MAX_INPUT_STREAM_LINE_BYTES = 256 * 1024;
 const HEARTBEAT_INTERVAL_MS = 30_000;
 const SSE_HEARTBEAT_INTERVAL_MS = 3_000;
+const TERMINAL_PRIVATE_PATH_MASK = '[cwd hidden]';
+const TERMINAL_PRIVATE_PATH_MASK_FILL = '.';
+const TERMINAL_PRIVATE_PATH_ALIAS_MIN_CHARS = 4;
+const TERMINAL_CODEX_STATUS_TAIL_MAX_CHARS = 512;
+const TERMINAL_CODEX_STATUS_SEPARATOR_CHARS = '·•∙';
+const TERMINAL_CODEX_STATUS_SEPARATOR_SOURCE = `[${TERMINAL_CODEX_STATUS_SEPARATOR_CHARS}]`;
+const TERMINAL_ANSI_SEQUENCE_SOURCE =
+  '\\x1b(?:\\[[0-?]*[ -/]*[@-~]|\\][^\\x07]*(?:\\x07|\\x1b\\\\)|.)';
+const TERMINAL_PRIVATE_PATH_PREFIX_SOURCE =
+  `(^|[\\s${TERMINAL_CODEX_STATUS_SEPARATOR_CHARS}"'\\\`([{<:=,;，。；：](?:${TERMINAL_ANSI_SEQUENCE_SOURCE})*)`;
+const TERMINAL_PRIVATE_PATH_BOUNDARY_SOURCE = `(?=$|[/\\s"'\\\`)\\]}>:;,，。；：])`;
+const TERMINAL_HOME_RELATIVE_PATH_TOKEN_SOURCE = '~\\/[^\\s"\'`\\)\\]}>\\x1b]+';
+const TERMINAL_ABSOLUTE_HOME_PATH_TOKEN_SOURCE =
+  '\\/home\\/[^\\/\\s"\'`\\)\\]}>\\x1b]+\\/[^\\s"\'`\\)\\]}>\\x1b]+';
+const TERMINAL_PRIVATE_PATH_FRAGMENT_TOKEN_SOURCE =
+  '(?:~(?:\\/[^\\s"\'`\\)\\]}>\\x1b]*)?|\\/[^\\s"\'`\\)\\]}>\\x1b]*)';
+const terminalHomeRelativePathPattern = new RegExp(
+  `${TERMINAL_PRIVATE_PATH_PREFIX_SOURCE}(${TERMINAL_HOME_RELATIVE_PATH_TOKEN_SOURCE})`,
+  'g',
+);
+const terminalAbsoluteHomePathPattern = new RegExp(
+  `${TERMINAL_PRIVATE_PATH_PREFIX_SOURCE}(${TERMINAL_ABSOLUTE_HOME_PATH_TOKEN_SOURCE})`,
+  'g',
+);
+const terminalCodexStatusModelSource = '(?:gpt-[A-Za-z0-9._-]+|o[0-9][A-Za-z0-9._-]*)';
+const terminalCodexStatusEffortSource = '(?:xhigh|high|medium|low|minimal)';
+const terminalCodexStatusOptionsSource = '(?:\\s+[A-Za-z0-9._-]+){0,2}';
+const terminalCodexStatusPlainPrefixSource =
+  `\\b${terminalCodexStatusModelSource}\\s+${terminalCodexStatusEffortSource}` +
+  `${terminalCodexStatusOptionsSource}\\s+${TERMINAL_CODEX_STATUS_SEPARATOR_SOURCE}`;
+const terminalCodexStatusPrivatePathPattern = new RegExp(
+  `${terminalCodexStatusPlainPrefixSource}\\s+` +
+    `(${TERMINAL_HOME_RELATIVE_PATH_TOKEN_SOURCE}|${TERMINAL_ABSOLUTE_HOME_PATH_TOKEN_SOURCE})`,
+  'g',
+);
+const terminalCodexStatusTrailingPathFragmentPattern = new RegExp(
+  `${terminalCodexStatusPlainPrefixSource}\\s+(${TERMINAL_PRIVATE_PATH_FRAGMENT_TOKEN_SOURCE})$`,
+);
+const terminalCodexStatusPathLeadPattern = new RegExp(
+  `${terminalCodexStatusPlainPrefixSource}\\s*$`,
+);
+const terminalLeadingPrivatePathPattern = new RegExp(
+  `^((?:${TERMINAL_ANSI_SEQUENCE_SOURCE})*\\s*(?:${TERMINAL_ANSI_SEQUENCE_SOURCE})*)` +
+    `(${TERMINAL_HOME_RELATIVE_PATH_TOKEN_SOURCE}|${TERMINAL_ABSOLUTE_HOME_PATH_TOKEN_SOURCE})`,
+  'g',
+);
+const terminalLeadingPathContinuationPattern = new RegExp(
+  `^((?:${TERMINAL_ANSI_SEQUENCE_SOURCE})*)([^\\s"'\\\`)\\]}>\\x1b]+)`,
+  'g',
+);
+const terminalLeadingPathFragmentPattern = new RegExp(
+  `^((?:${TERMINAL_ANSI_SEQUENCE_SOURCE})*\\s*(?:${TERMINAL_ANSI_SEQUENCE_SOURCE})*)` +
+    `(${TERMINAL_PRIVATE_PATH_FRAGMENT_TOKEN_SOURCE})`,
+  'g',
+);
+const terminalAnsiSequencePattern = new RegExp(TERMINAL_ANSI_SEQUENCE_SOURCE, 'g');
 
 const tickets = new Map();
 const sessions = new Map();
@@ -253,6 +309,204 @@ function trimUtf8Tail(data, maxBytes) {
   return buffer.subarray(Math.max(0, buffer.length - maxBytes)).toString('utf8');
 }
 
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function normalizeTerminalPath(value) {
+  return String(value || '').trim().replace(/\\/g, '/').replace(/\/+$/, '');
+}
+
+function maskTerminalPathToken(prefix, pathToken) {
+  if (pathToken.length <= TERMINAL_PRIVATE_PATH_MASK.length) {
+    return `${prefix}${TERMINAL_PRIVATE_PATH_MASK.slice(0, Math.max(1, pathToken.length))}`;
+  }
+  return `${prefix}${TERMINAL_PRIVATE_PATH_MASK}${TERMINAL_PRIVATE_PATH_MASK_FILL.repeat(
+    pathToken.length - TERMINAL_PRIVATE_PATH_MASK.length,
+  )}`;
+}
+
+function getTerminalPrivatePathAliases(cwd) {
+  const normalized = normalizeTerminalPath(cwd);
+  if (!normalized || normalized === '/') {
+    return [];
+  }
+
+  const aliases = new Set([normalized]);
+  const homeMatch = normalized.match(/^\/home\/[^/]+(?=\/|$)/);
+  if (homeMatch) {
+    const suffix = normalized.slice(homeMatch[0].length);
+    if (suffix) {
+      aliases.add(`~${suffix}`);
+    }
+  }
+  const pathParts = normalized.split('/').filter(Boolean);
+  for (let index = 2; index < pathParts.length; index += 1) {
+    const suffix = `/${pathParts.slice(index).join('/')}`;
+    if (suffix.length >= TERMINAL_PRIVATE_PATH_ALIAS_MIN_CHARS) {
+      aliases.add(suffix);
+    }
+  }
+
+  return [...aliases]
+    .filter((alias) => alias.length > 1)
+    .sort((left, right) => right.length - left.length);
+}
+
+function expandTerminalHomePath(pathToken, cwd) {
+  if (!pathToken?.startsWith('~/')) {
+    return pathToken;
+  }
+  const homeMatch = normalizeTerminalPath(cwd).match(/^\/home\/[^/]+(?=\/|$)/);
+  if (!homeMatch) {
+    return pathToken;
+  }
+  return `${homeMatch[0]}${pathToken.slice(1)}`;
+}
+
+function stripTerminalAnsiSequences(data) {
+  terminalAnsiSequencePattern.lastIndex = 0;
+  return data.replace(terminalAnsiSequencePattern, '');
+}
+
+function getTerminalPathMatchingText(data) {
+  return stripTerminalAnsiSequences(data).replace(/[\x00-\x1f\x7f]+/g, '');
+}
+
+function collectTerminalPathMatches(paths, data, pattern, cwd) {
+  pattern.lastIndex = 0;
+  for (const match of data.matchAll(pattern)) {
+    const pathToken = match[2];
+    if (pathToken) {
+      paths.push(expandTerminalHomePath(pathToken, cwd));
+    }
+  }
+}
+
+function extractTerminalCodexStatusPrivatePathCandidates(data, cwd) {
+  const plain = getTerminalPathMatchingText(data);
+  const paths = [];
+  terminalCodexStatusPrivatePathPattern.lastIndex = 0;
+  for (const match of plain.matchAll(terminalCodexStatusPrivatePathPattern)) {
+    const pathToken = match[1];
+    if (pathToken) {
+      paths.push(expandTerminalHomePath(pathToken, cwd));
+    }
+  }
+  return paths;
+}
+
+function extractTerminalCodexStatusTrailingPathFragment(data) {
+  const plain = getTerminalPathMatchingText(data);
+  const match = plain.match(terminalCodexStatusTrailingPathFragmentPattern);
+  return match?.[1] ?? '';
+}
+
+function endsWithTerminalCodexStatusPathLead(data) {
+  terminalCodexStatusPathLeadPattern.lastIndex = 0;
+  return terminalCodexStatusPathLeadPattern.test(getTerminalPathMatchingText(data));
+}
+
+function extractTerminalLeadingPrivatePathCandidates(data, cwd) {
+  const paths = [];
+  collectTerminalPathMatches(paths, data, terminalLeadingPrivatePathPattern, cwd);
+  return paths;
+}
+
+function extractTerminalLeadingPathFragmentToken(data) {
+  const plain = getTerminalPathMatchingText(data);
+  const match = plain.match(terminalLeadingPathFragmentPattern);
+  return match?.[2] ?? '';
+}
+
+function extractTerminalLeadingPathFragmentCandidates(data, cwd) {
+  const fragment = extractTerminalLeadingPathFragmentToken(data);
+  return fragment ? [expandTerminalHomePath(fragment, cwd)] : [];
+}
+
+function extractTerminalLeadingPathContinuationToken(data) {
+  const plain = getTerminalPathMatchingText(data);
+  const match = plain.match(terminalLeadingPathContinuationPattern);
+  return match?.[2] ?? '';
+}
+
+function joinTerminalPathContinuation(pathPrefix, continuation) {
+  if (!pathPrefix || !continuation) {
+    return '';
+  }
+  if (pathPrefix.endsWith('/') || continuation.startsWith('/')) {
+    return `${pathPrefix}${continuation}`;
+  }
+  return `${pathPrefix}/${continuation}`;
+}
+
+function extractTerminalPathContinuationCandidates(data, cwd, pathPrefix) {
+  const continuation = extractTerminalLeadingPathContinuationToken(data);
+  const joined = joinTerminalPathContinuation(pathPrefix, continuation);
+  return joined ? [expandTerminalHomePath(joined, cwd)] : [];
+}
+
+function maskExactTerminalPathAlias(data, alias) {
+  const aliasPattern = new RegExp(
+    `${TERMINAL_PRIVATE_PATH_PREFIX_SOURCE}(${escapeRegExp(alias)})${TERMINAL_PRIVATE_PATH_BOUNDARY_SOURCE}`,
+    'g',
+  );
+  return data.replace(aliasPattern, (_match, prefix, pathToken) =>
+    maskTerminalPathToken(prefix, pathToken),
+  );
+}
+
+function maskTerminalPrivatePaths(data, cwd, extraAliases = []) {
+  if (!data) {
+    return data;
+  }
+
+  let masked = data.replace(
+    terminalHomeRelativePathPattern,
+    (_match, prefix, pathToken) => maskTerminalPathToken(prefix, pathToken),
+  );
+  masked = masked.replace(
+    terminalAbsoluteHomePathPattern,
+    (_match, prefix, pathToken) => maskTerminalPathToken(prefix, pathToken),
+  );
+
+  const aliases = new Set([...getTerminalPrivatePathAliases(cwd), ...extraAliases]);
+  for (const alias of [...aliases].filter(Boolean).sort((left, right) => right.length - left.length)) {
+    masked = maskExactTerminalPathAlias(masked, alias);
+  }
+  return masked;
+}
+
+function maskTerminalLeadingPrivatePath(data) {
+  if (!data) {
+    return data;
+  }
+  terminalLeadingPrivatePathPattern.lastIndex = 0;
+  return data.replace(terminalLeadingPrivatePathPattern, (_match, prefix, pathToken) =>
+    maskTerminalPathToken(prefix, pathToken),
+  );
+}
+
+function maskTerminalLeadingPathContinuation(data) {
+  if (!data) {
+    return data;
+  }
+  terminalLeadingPathContinuationPattern.lastIndex = 0;
+  return data.replace(terminalLeadingPathContinuationPattern, (_match, prefix, pathToken) =>
+    maskTerminalPathToken(prefix, pathToken),
+  );
+}
+
+function maskTerminalLeadingPathFragment(data) {
+  if (!data) {
+    return data;
+  }
+  terminalLeadingPathFragmentPattern.lastIndex = 0;
+  return data.replace(terminalLeadingPathFragmentPattern, (_match, prefix, pathToken) =>
+    maskTerminalPathToken(prefix, pathToken),
+  );
+}
+
 function serializeSession(session) {
   return {
     sessionId: session.sessionId,
@@ -383,6 +637,10 @@ class CodexCliSession {
     this.liveOutputBuffer = '';
     this.liveOutputSeq = 0;
     this.liveOutputTimer = null;
+    this.outputPrivacyActive = this.mode === 'codex';
+    this.outputRedactionTail = '';
+    this.outputRedactionPathPrefix = '';
+    this.outputPrivatePathAliases = new Set(getTerminalPrivatePathAliases(this.repoPath));
     this.headlessPendingBuffer = '';
     this.headlessPendingBytes = 0;
     this.headlessFlushTimer = null;
@@ -557,7 +815,7 @@ class CodexCliSession {
 
   flushLiveOutput() {
     this.cancelLiveOutputTimer();
-    const data = this.liveOutputBuffer;
+    const data = this.redactTerminalOutput(this.liveOutputBuffer);
     const seq = this.liveOutputSeq || this.replaySeq;
     this.liveOutputBuffer = '';
     this.liveOutputSeq = 0;
@@ -572,7 +830,7 @@ class CodexCliSession {
       return;
     }
     if (!this.liveOutputBuffer && data.length <= LIVE_OUTPUT_IMMEDIATE_CHARS) {
-      this.broadcast({ type: 'data', data, seq });
+      this.broadcast({ type: 'data', data: this.redactTerminalOutput(data), seq });
       return;
     }
     this.liveOutputBuffer += data;
@@ -664,6 +922,88 @@ class CodexCliSession {
     }
   }
 
+  rememberTerminalOutputPrivatePaths(paths) {
+    for (const pathValue of paths) {
+      for (const alias of getTerminalPrivatePathAliases(pathValue)) {
+        this.outputPrivatePathAliases.add(alias);
+      }
+    }
+  }
+
+  getTerminalOutputAliases() {
+    return [...this.outputPrivatePathAliases]
+      .filter((alias) => alias.length >= TERMINAL_PRIVATE_PATH_ALIAS_MIN_CHARS)
+      .sort((left, right) => right.length - left.length);
+  }
+
+  redactTerminalOutput(data, options = {}) {
+    if (!data) {
+      return data;
+    }
+
+    const cwd = this.repoPath;
+    const statusTail = options.tail ?? this.outputRedactionTail;
+    const statusPathPrefix = options.pathPrefix ?? this.outputRedactionPathPrefix;
+    const codexStatusPaths = extractTerminalCodexStatusPrivatePathCandidates(data, cwd);
+    const codexStatusPathFragment = extractTerminalCodexStatusTrailingPathFragment(data);
+    const splitCodexStatusPaths = endsWithTerminalCodexStatusPathLead(statusTail)
+      ? extractTerminalLeadingPrivatePathCandidates(data, cwd)
+      : [];
+    const splitCodexStatusPathFragments = endsWithTerminalCodexStatusPathLead(statusTail)
+      ? extractTerminalLeadingPathFragmentCandidates(data, cwd)
+      : [];
+    const statusContinuationPaths = statusPathPrefix
+      ? extractTerminalPathContinuationCandidates(data, cwd, statusPathPrefix)
+      : [];
+    const hasSplitCodexStatusPath =
+      splitCodexStatusPaths.length > 0 || splitCodexStatusPathFragments.length > 0;
+    const hasStatusContinuationPath = statusContinuationPaths.length > 0;
+    const hasCodexStatusPath =
+      codexStatusPaths.length > 0 ||
+      !!codexStatusPathFragment ||
+      hasSplitCodexStatusPath ||
+      hasStatusContinuationPath;
+
+    if (hasCodexStatusPath) {
+      this.outputPrivacyActive = true;
+      this.rememberTerminalOutputPrivatePaths([
+        ...codexStatusPaths,
+        ...splitCodexStatusPaths,
+        ...statusContinuationPaths,
+      ]);
+    }
+
+    const shouldRedact = this.mode === 'codex' || this.outputPrivacyActive || hasCodexStatusPath;
+    let redacted = shouldRedact
+      ? maskTerminalPrivatePaths(data, cwd, this.getTerminalOutputAliases())
+      : data;
+    if (shouldRedact && hasStatusContinuationPath) {
+      redacted = maskTerminalLeadingPathContinuation(redacted);
+    } else if (shouldRedact && splitCodexStatusPathFragments.length > 0) {
+      redacted = maskTerminalLeadingPathFragment(redacted);
+    } else if (shouldRedact && splitCodexStatusPaths.length > 0) {
+      redacted = maskTerminalLeadingPrivatePath(redacted);
+    }
+
+    if (!options.stateless) {
+      const nextStatusTail = `${statusTail}${data}`.slice(-TERMINAL_CODEX_STATUS_TAIL_MAX_CHARS);
+      this.outputRedactionTail = nextStatusTail;
+      this.outputRedactionPathPrefix = extractTerminalCodexStatusTrailingPathFragment(nextStatusTail);
+    }
+    return redacted;
+  }
+
+  redactTerminalMessage(message, options = {}) {
+    if (!message || (message.type !== 'data' && message.type !== 'replay')) {
+      return message;
+    }
+    const data = message.data ?? '';
+    return {
+      ...message,
+      data: this.redactTerminalOutput(data, options),
+    };
+  }
+
   queueHeadlessWrite(data) {
     this.replaySeq += 1;
     if (!this.headlessTerminal || this.headlessWriteFailed) {
@@ -699,7 +1039,12 @@ class CodexCliSession {
   async createReplayMessage(maxBytes = MAX_REPLAY_BYTES) {
     const seq = this.replaySeq;
     if (!this.headlessTerminal || !this.serializeAddon || this.headlessWriteFailed) {
-      return { type: 'replay', data: trimUtf8Tail(this.buffer, maxBytes), seq, replayKind: 'raw-tail' };
+      return this.redactTerminalMessage({
+        type: 'replay',
+        data: trimUtf8Tail(this.buffer, maxBytes),
+        seq,
+        replayKind: 'raw-tail',
+      }, { stateless: true });
     }
     try {
       this.flushHeadlessWrite();
@@ -711,7 +1056,12 @@ class CodexCliSession {
         }),
       ]);
       if (timedOut) {
-        return { type: 'replay', data: trimUtf8Tail(this.buffer, maxBytes), seq, replayKind: 'raw-tail' };
+        return this.redactTerminalMessage({
+          type: 'replay',
+          data: trimUtf8Tail(this.buffer, maxBytes),
+          seq,
+          replayKind: 'raw-tail',
+        }, { stateless: true });
       }
       let replayScrollbackRows = getReplayScrollbackRows();
       let replayData = this.serializeAddon.serialize({ scrollback: replayScrollbackRows });
@@ -723,23 +1073,33 @@ class CodexCliSession {
         replayData = this.serializeAddon.serialize({ scrollback: replayScrollbackRows });
       }
       if (Buffer.byteLength(replayData, 'utf8') > maxBytes) {
-        return { type: 'replay', data: trimUtf8Tail(this.buffer, maxBytes), seq, replayKind: 'raw-tail' };
+        return this.redactTerminalMessage({
+          type: 'replay',
+          data: trimUtf8Tail(this.buffer, maxBytes),
+          seq,
+          replayKind: 'raw-tail',
+        }, { stateless: true });
       }
-      return {
+      return this.redactTerminalMessage({
         type: 'replay',
         data: replayData,
         seq,
         replayKind: 'xterm-serialize',
         cols: this.headlessTerminal.cols,
         rows: this.headlessTerminal.rows,
-      };
+      }, { stateless: true });
     } catch (error) {
       this.headlessWriteFailed = true;
       logger.warn('[CodexCliTerminal] Headless terminal serialize failed', {
         sessionId: this.sessionId,
         error: error?.message ?? error,
       });
-      return { type: 'replay', data: trimUtf8Tail(this.buffer, maxBytes), seq, replayKind: 'raw-tail' };
+      return this.redactTerminalMessage({
+        type: 'replay',
+        data: trimUtf8Tail(this.buffer, maxBytes),
+        seq,
+        replayKind: 'raw-tail',
+      }, { stateless: true });
     }
   }
 
@@ -757,7 +1117,10 @@ class CodexCliSession {
     const messages = [];
     for (const record of this.outputHistory) {
       if (record.seq > afterSeq) {
-        messages.push({ type: 'data', data: record.data, seq: record.seq });
+        messages.push(this.redactTerminalMessage(
+          { type: 'data', data: record.data, seq: record.seq },
+          { stateless: true },
+        ));
       }
     }
     return messages.length > 0 ? messages : null;
@@ -1870,6 +2233,26 @@ function attachCodexCliTerminal(server) {
 }
 
 module.exports = {
+  __terminalPrivacyTestUtils: {
+    createTerminalOutputRedactor({ cwd, mode = 'shell' } = {}) {
+      const redactor = Object.create(CodexCliSession.prototype);
+      redactor.repoPath = normalizeTerminalPath(cwd || getRepoPath());
+      redactor.mode = normalizeMode(mode);
+      redactor.outputPrivacyActive = redactor.mode === 'codex';
+      redactor.outputRedactionTail = '';
+      redactor.outputRedactionPathPrefix = '';
+      redactor.outputPrivatePathAliases = new Set(getTerminalPrivatePathAliases(redactor.repoPath));
+      return {
+        get privacyActive() {
+          return redactor.outputPrivacyActive;
+        },
+        redact(data, options) {
+          return redactor.redactTerminalOutput(data, options);
+        },
+      };
+    },
+    maskTerminalPrivatePaths,
+  },
   ackCodexCliSessionOutput,
   attachCodexCliEventStream,
   attachCodexCliInputStream,
