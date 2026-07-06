@@ -819,6 +819,27 @@ function maskTerminalRestoredPrivatePaths(
   return maskTerminalPrivatePaths(data, cwd);
 }
 
+function getTerminalOutputPathPrivacyUpdate(
+  data: string,
+  cwd: string,
+  codexStatusPathsOverride?: string[],
+) {
+  const codexStatusPaths =
+    codexStatusPathsOverride ?? extractTerminalCodexStatusPrivatePathCandidates(data, cwd);
+  const aliasPaths =
+    codexStatusPaths.length > 0 ? codexStatusPaths : extractTerminalPrivatePathCandidates(data, cwd);
+  return {
+    aliasPaths,
+    displayCwd: codexStatusPaths.at(-1) ?? null,
+    hasCodexStatusPath: codexStatusPaths.length > 0,
+  };
+}
+
+export const __terminalPrivacyTestUtils = {
+  getTerminalOutputPathPrivacyUpdate,
+  maskTerminalRestoredPrivatePaths,
+};
+
 function createInputClientId() {
   if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
     return crypto.randomUUID();
@@ -992,6 +1013,7 @@ function installClipboardHandlers(
   terminal: Terminal,
   container: HTMLDivElement,
   writeInput: (data: string) => void,
+  maskClipboardText: (data: string) => string = (data) => data,
 ) {
   terminal.attachCustomKeyEventHandler((event) => {
     const wordSequence = getTerminalWordSequence(event);
@@ -1012,7 +1034,7 @@ function installClipboardHandlers(
       if (event.type === 'keydown') {
         event.preventDefault();
         event.stopPropagation();
-        copyToClipboard(selection);
+        copyToClipboard(maskClipboardText(selection));
       }
       return false;
     }
@@ -1415,8 +1437,8 @@ export default function CodexCliRoute() {
       }
       return;
     }
-    if (source !== 'output' && terminalCwdFromOutputRef.current && terminalCwdRef.current) {
-      return;
+    if (source === 'session') {
+      terminalCwdFromOutputRef.current = false;
     }
     if (source === 'output') {
       terminalCwdFromOutputRef.current = true;
@@ -1439,13 +1461,12 @@ export default function CodexCliRoute() {
       if (!terminalCwdPrivacyActiveRef.current) {
         return;
       }
-      const paths =
-        codexStatusPaths.length > 0
-          ? codexStatusPaths
-          : extractTerminalPrivatePathCandidates(data, cwd);
-      const latestPath = paths.at(-1);
-      if (latestPath) {
-        rememberTerminalCwd(latestPath, 'output');
+      const update = getTerminalOutputPathPrivacyUpdate(data, cwd, codexStatusPaths);
+      for (const aliasPath of update.aliasPaths) {
+        rememberPrivatePathAliases(aliasPath);
+      }
+      if (update.displayCwd) {
+        rememberTerminalCwd(update.displayCwd, 'output');
       }
     },
     [enableTerminalCwdPrivacy, rememberTerminalCwd],
@@ -3234,7 +3255,18 @@ export default function CodexCliRoute() {
       }
     };
 
-    const disposeClipboardHandlers = installClipboardHandlers(terminal, container, writeInput);
+    const disposeClipboardHandlers = installClipboardHandlers(
+      terminal,
+      container,
+      writeInput,
+      (data) =>
+        maskTerminalRestoredPrivatePaths(
+          data,
+          terminalCwdRef.current,
+          terminalModeRef.current === 'codex',
+          terminalCwdPrivacyActiveRef.current,
+        ),
+    );
     const disposeFileLineSelectionHandler = installFileLineSelectionHandler(terminal, container);
     void loadTerminalFonts(terminalFontSize).then(() => {
       if (disposed) {
