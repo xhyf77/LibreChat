@@ -14,6 +14,7 @@ import useMermaidZoom from './useMermaidZoom';
 import ZoomControls from './ZoomControls';
 import { useLocalize } from '~/hooks';
 import cn from '~/utils/cn';
+import { maskPrivateLocalPaths } from '~/utils/privatePathMask';
 
 interface MermaidDialogProps {
   open: boolean;
@@ -56,7 +57,7 @@ const MermaidDialog: React.FC<MermaidDialogProps> = memo(
     }, []);
 
     const handleCopy = useCallback(() => {
-      copy(codeContent.trim(), { format: 'text/plain' });
+      copy(maskPrivateLocalPaths(codeContent.trim()), { format: 'text/plain' });
       setIsCopied(true);
       requestAnimationFrame(() => copyButtonRef.current?.focus());
       clearTimeout(copyTimerRef.current);

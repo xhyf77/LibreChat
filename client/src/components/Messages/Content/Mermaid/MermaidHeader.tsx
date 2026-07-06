@@ -6,6 +6,7 @@ import { Expand, ChevronUp, ChevronDown } from 'lucide-react';
 import CopyButton from '~/components/Messages/Content/CopyButton';
 import { useLocalize } from '~/hooks';
 import cn from '~/utils/cn';
+import { maskPrivateLocalPaths } from '~/utils/privatePathMask';
 
 interface MermaidHeaderProps {
   className?: string;
@@ -43,7 +44,7 @@ const MermaidHeader: React.FC<MermaidHeaderProps> = memo(
     }, []);
 
     const handleCopy = useCallback(() => {
-      copy(codeContent.trim(), { format: 'text/plain' });
+      copy(maskPrivateLocalPaths(codeContent.trim()), { format: 'text/plain' });
       setIsCopied(true);
       clearTimeout(copyTimerRef.current);
       copyTimerRef.current = setTimeout(() => setIsCopied(false), 3000);

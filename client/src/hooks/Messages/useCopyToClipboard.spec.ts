@@ -43,6 +43,22 @@ describe('useCopyToClipboard', () => {
       expect(mockSetIsCopied).toHaveBeenCalledWith(true);
     });
 
+    it('should mask private local paths before copying plain text', () => {
+      const { result } = renderHook(() =>
+        useCopyToClipboard({
+          text: 'Working in /home/tester/private-repo/src/index.ts now',
+        }),
+      );
+
+      act(() => {
+        result.current(mockSetIsCopied);
+      });
+
+      const copied = mockCopy.mock.calls[0]?.[0] as string;
+      expect(copied).toContain('[cwd hidden]');
+      expect(copied).not.toContain('/home/tester/private-repo');
+    });
+
     it('should handle content array with text types', () => {
       const content = [
         { type: ContentTypes.TEXT, text: 'First line' },
@@ -141,6 +157,26 @@ Citations:
 `;
 
       expect(mockCopy).toHaveBeenCalledWith(expectedText, { format: 'text/plain' });
+    });
+
+    it('should mask private local paths before copying text with citations', () => {
+      const text = 'See /home/tester/private-repo/src/index.ts and \\ue202turn0search0.';
+
+      const { result } = renderHook(() =>
+        useCopyToClipboard({
+          text,
+          searchResults: mockSearchResults,
+        }),
+      );
+
+      act(() => {
+        result.current(mockSetIsCopied);
+      });
+
+      const copied = mockCopy.mock.calls[0]?.[0] as string;
+      expect(copied).toContain('[cwd hidden]');
+      expect(copied).toContain('Citations:');
+      expect(copied).not.toContain('/home/tester/private-repo');
     });
 
     it('should format news citations with correct mapping', () => {

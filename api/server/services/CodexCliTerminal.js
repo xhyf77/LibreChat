@@ -29,8 +29,8 @@ const SSE_MAX_BUFFERED_BYTES = 2 * 1024 * 1024;
 const SSE_CLIENT_HIGH_WATER_BYTES = 96 * 1024;
 const SSE_CLIENT_CLOSE_BYTES = 256 * 1024;
 const SSE_CLIENT_ACK_TIMEOUT_MS = 5_000;
-const SSE_REPLAY_MAX_BYTES = 64 * 1024;
-const SSE_RESUME_MAX_BYTES = 64 * 1024;
+const SSE_REPLAY_MAX_BYTES = MAX_REPLAY_BYTES;
+const SSE_RESUME_MAX_BYTES = MAX_REPLAY_BYTES;
 const SSE_ATTACH_BACKLOG_MAX_BYTES = 96 * 1024;
 const MAX_INPUT_BYTES = 64 * 1024;
 const MAX_INPUT_BATCH_BYTES = 128 * 1024;
@@ -878,8 +878,16 @@ class CodexCliSession {
       client.replayBacklog.push(message);
       client.replayBacklogBytes += Buffer.byteLength(data, 'utf8');
       if (client.replayBacklogBytes > (client.maxReplayBacklogBytes ?? MAX_ATTACH_BACKLOG_BYTES)) {
-        client.replayBacklog = [message];
-        client.replayBacklogBytes = Buffer.byteLength(data, 'utf8');
+        logger.warn('[CodexCliTerminal] Closing replay client after backlog overflow', {
+          sessionId: this.sessionId,
+          replayBacklogBytes: client.replayBacklogBytes,
+          maxReplayBacklogBytes: client.maxReplayBacklogBytes ?? MAX_ATTACH_BACKLOG_BYTES,
+          messageSeq: message.seq,
+          serverPid: process.pid,
+          serverInstanceId,
+        });
+        client.closed = true;
+        client.close?.();
       }
       return;
     }
@@ -895,6 +903,7 @@ class CodexCliSession {
       replaying: false,
       replayBacklog: [],
       replayBacklogBytes: 0,
+      close: () => ws.close(1013, 'Terminal replay backlog overflow'),
     };
     ws.codexReplayClient = client;
     this.flushLiveOutput();

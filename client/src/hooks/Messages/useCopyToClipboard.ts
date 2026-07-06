@@ -9,6 +9,7 @@ import {
   STANDALONE_PATTERN,
   INVALID_CITATION_REGEX,
 } from '~/utils/citations';
+import { maskPrivateLocalPaths } from '~/utils/privatePathMask';
 
 type Source = {
   link: string;
@@ -70,7 +71,7 @@ export default function useCopyToClipboard({
           .replace(INVALID_CITATION_REGEX, '')
           .replace(CLEANUP_REGEX, '');
 
-        copy(cleanedText, { format: 'text/plain' });
+        copy(maskPrivateLocalPaths(cleanedText), { format: 'text/plain' });
         copyTimeoutRef.current = setTimeout(() => {
           setIsCopied(false);
         }, 3000);
@@ -95,7 +96,7 @@ export default function useCopyToClipboard({
         }
       }
 
-      copy(processedText, { format: 'text/plain' });
+      copy(maskPrivateLocalPaths(processedText), { format: 'text/plain' });
       copyTimeoutRef.current = setTimeout(() => {
         setIsCopied(false);
       }, 3000);

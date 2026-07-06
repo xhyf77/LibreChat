@@ -54,6 +54,10 @@ type TerminalSnapshot = {
   data: string;
 };
 
+type TerminalWriteOptions = {
+  alreadyMasked?: boolean;
+};
+
 type PendingInputChunk = {
   seq: number;
   data: string;
@@ -136,12 +140,13 @@ const terminalSnapshotMinIntervalMs = 3000;
 const terminalSnapshotSlowMs = 120;
 const terminalSnapshotSlowBackoffMs = 15000;
 const terminalSnapshotTtlMs = 30000;
-const terminalReplayChunkChars = 4 * 1024;
+const terminalReplayChunkChars = 2 * 1024;
 const terminalLiveWriteFlushChars = 4 * 1024;
 const terminalLiveDirectWriteChars = 1024;
 const terminalLiveDirectWriteMinIntervalMs = 6;
 const terminalWritePendingMaxChars = 128 * 1024;
-const terminalHiddenBacklogMaxChars = 256 * 1024;
+const terminalInputBacklogReplayChars = 48 * 1024;
+const terminalHiddenBacklogMaxChars = 64 * 1024;
 const terminalHiddenForceReplayMs = 5 * 60_000;
 const terminalRestoreThrottleMs = 250;
 const terminalResponseSuppressMs = 1500;
@@ -1167,22 +1172,35 @@ function writeTerminalData(
   terminal: Terminal,
   data: string,
   callback?: () => void,
+  shouldContinue?: () => boolean,
+  onRemainingChars?: (chars: number) => void,
 ) {
   if (!data || data.length <= terminalReplayChunkChars) {
-    terminal.write(data, callback);
+    onRemainingChars?.(data.length);
+    terminal.write(data, () => {
+      onRemainingChars?.(0);
+      callback?.();
+    });
     return;
   }
 
   let offset = 0;
   const writeNextChunk = () => {
+    if (shouldContinue && !shouldContinue()) {
+      onRemainingChars?.(0);
+      callback?.();
+      return;
+    }
     const chunk = data.slice(offset, offset + terminalReplayChunkChars);
     offset += terminalReplayChunkChars;
+    onRemainingChars?.(Math.max(0, data.length - offset + chunk.length));
     terminal.write(chunk, () => {
+      onRemainingChars?.(Math.max(0, data.length - offset));
       if (offset >= data.length) {
         callback?.();
         return;
       }
-      window.requestAnimationFrame(writeNextChunk);
+      window.setTimeout(writeNextChunk, 0);
     });
   };
   writeNextChunk();
@@ -1308,10 +1326,15 @@ export default function CodexCliRoute() {
   const pendingOutputAckBytesRef = useRef(0);
   const sendOutputAckRef = useRef<(bytes: number) => void>(() => undefined);
   const terminalWriteInFlightRef = useRef(false);
+  const terminalWriteActiveRemainingRef = useRef(0);
   const terminalWritePendingRef = useRef('');
   const terminalWritePendingCallbacksRef = useRef<(() => void)[]>([]);
   const terminalWriteGenerationRef = useRef(0);
-  const writeTerminalOutputRef = useRef<(data: string, callback?: () => void) => void>(
+  const writeTerminalOutputRef = useRef<(
+    data: string,
+    callback?: () => void,
+    options?: TerminalWriteOptions,
+  ) => void>(
     () => undefined,
   );
   const lastDirectTerminalWriteAtRef = useRef(0);
@@ -1569,6 +1592,14 @@ export default function CodexCliRoute() {
     [],
   );
 
+  const getPendingTerminalOutputChars = useCallback(
+    () =>
+      terminalWriteActiveRemainingRef.current +
+      terminalWritePendingRef.current.length +
+      terminalOutputBufferRef.current.length,
+    [],
+  );
+
   const createInputChunk = useCallback((data: string): PendingInputChunk => {
     const chunk = {
       seq: nextInputSeqRef.current,
@@ -1624,15 +1655,21 @@ export default function CodexCliRoute() {
   const resetTerminalWriteQueue = useCallback(() => {
     terminalWriteGenerationRef.current += 1;
     terminalWriteInFlightRef.current = false;
+    terminalWriteActiveRemainingRef.current = 0;
     terminalWritePendingRef.current = '';
     terminalWritePendingCallbacksRef.current = [];
     terminalDebugMetricsRef.current.currentTerminalWritePendingChars = 0;
   }, []);
 
-  const writeTerminalOutput = useCallback((data: string, callback?: () => void) => {
+  const writeTerminalOutput = useCallback((
+    data: string,
+    callback?: () => void,
+    options: TerminalWriteOptions = {},
+  ) => {
     const terminal = terminalRef.current;
     const shouldMaskWriteData =
-      terminalModeRef.current === 'codex' || terminalCwdPrivacyActiveRef.current;
+      !options.alreadyMasked &&
+      (terminalModeRef.current === 'codex' || terminalCwdPrivacyActiveRef.current);
     const outputData = shouldMaskWriteData
       ? maskTerminalPrivatePaths(data, terminalCwdRef.current)
       : data;
@@ -1645,19 +1682,20 @@ export default function CodexCliRoute() {
     if (terminalWriteInFlightRef.current) {
       terminalWritePendingRef.current += outputData;
       terminalDebugMetricsRef.current.currentTerminalWritePendingChars =
-        terminalWritePendingRef.current.length;
+        terminalWriteActiveRemainingRef.current + terminalWritePendingRef.current.length;
       if (callback) {
         terminalWritePendingCallbacksRef.current.push(callback);
       }
       terminalDebugMetricsRef.current.maxTerminalWritePendingChars = Math.max(
         terminalDebugMetricsRef.current.maxTerminalWritePendingChars,
-        terminalWritePendingRef.current.length,
+        terminalWriteActiveRemainingRef.current + terminalWritePendingRef.current.length,
       );
-      if (terminalWritePendingRef.current.length > terminalWritePendingMaxChars) {
+      if (
+        terminalWriteActiveRemainingRef.current + terminalWritePendingRef.current.length >
+        terminalWritePendingMaxChars
+      ) {
         terminalDebugMetricsRef.current.terminalWriteOverflows += 1;
-        terminalWritePendingRef.current = '';
-        terminalWritePendingCallbacksRef.current = [];
-        terminalDebugMetricsRef.current.currentTerminalWritePendingChars = 0;
+        resetTerminalWriteQueue();
         resetBeforeReplayRef.current = true;
         requestReconnectRef.current();
       }
@@ -1666,11 +1704,19 @@ export default function CodexCliRoute() {
 
     const generation = terminalWriteGenerationRef.current;
     terminalWriteInFlightRef.current = true;
+    terminalWriteActiveRemainingRef.current = outputData.length;
+    terminalDebugMetricsRef.current.currentTerminalWritePendingChars =
+      terminalWriteActiveRemainingRef.current + terminalWritePendingRef.current.length;
+    terminalDebugMetricsRef.current.maxTerminalWritePendingChars = Math.max(
+      terminalDebugMetricsRef.current.maxTerminalWritePendingChars,
+      terminalDebugMetricsRef.current.currentTerminalWritePendingChars,
+    );
     writeTerminalData(terminal, outputData, () => {
       if (terminalWriteGenerationRef.current !== generation) {
         callback?.();
         return;
       }
+      terminalWriteActiveRemainingRef.current = 0;
       terminalWriteInFlightRef.current = false;
       if (needsPrivacyRefresh) {
         scheduleTerminalPrivacyRefresh();
@@ -1687,11 +1733,22 @@ export default function CodexCliRoute() {
             for (const pendingCallback of pendingCallbacks) {
               pendingCallback();
             }
-          });
+          }, { alreadyMasked: true });
         }, 0);
       }
+    }, () => terminalWriteGenerationRef.current === generation, (remaining) => {
+      if (terminalWriteGenerationRef.current !== generation) {
+        return;
+      }
+      terminalWriteActiveRemainingRef.current = remaining;
+      terminalDebugMetricsRef.current.currentTerminalWritePendingChars =
+        remaining + terminalWritePendingRef.current.length;
+      terminalDebugMetricsRef.current.maxTerminalWritePendingChars = Math.max(
+        terminalDebugMetricsRef.current.maxTerminalWritePendingChars,
+        terminalDebugMetricsRef.current.currentTerminalWritePendingChars,
+      );
     });
-  }, [scheduleTerminalPrivacyRefresh]);
+  }, [resetTerminalWriteQueue, scheduleTerminalPrivacyRefresh]);
 
   writeTerminalOutputRef.current = writeTerminalOutput;
 
@@ -1716,7 +1773,7 @@ export default function CodexCliRoute() {
       markOutputApplied(outputSeq);
       sendOutputAckRef.current(ackBytes || getTerminalOutputBytes(data));
       afterFlush?.();
-    });
+    }, { alreadyMasked: true });
   }, [cancelQueuedTerminalOutput, markOutputApplied, scheduleTerminalPrivacyRefresh]);
 
   const scheduleQueuedTerminalOutput = useCallback(() => {
@@ -1827,7 +1884,7 @@ export default function CodexCliRoute() {
             }
             markOutputApplied(outputSeq);
             sendOutputAckRef.current(getTerminalOutputBytes(data));
-          });
+          }, { alreadyMasked: true });
           return;
         }
       }
@@ -1973,7 +2030,7 @@ export default function CodexCliRoute() {
         }
         terminal.refresh(0, Math.max(0, terminal.rows - 1));
         restoreTerminalViewport(terminal, viewportSnapshot);
-      });
+      }, { alreadyMasked: true });
       return true;
     } catch {
       return false;
@@ -2713,7 +2770,7 @@ export default function CodexCliRoute() {
             clearTimeout(snapshotClearTimerRef.current);
             snapshotClearTimerRef.current = null;
           }
-        });
+        }, { alreadyMasked: true });
         return;
       }
       if (message.type === 'data') {
@@ -3142,6 +3199,19 @@ export default function CodexCliRoute() {
       if (hasExitedRef.current) {
         return;
       }
+      if (
+        activeSessionIdRef.current &&
+        getPendingTerminalOutputChars() > terminalInputBacklogReplayChars
+      ) {
+        queueHttpInput(data);
+        clearQueuedTerminalOutput();
+        resetTerminalWriteQueue();
+        terminalCodexStatusTailRef.current = '';
+        terminalCodexStatusPathPrefixRef.current = '';
+        resetBeforeReplayRef.current = true;
+        markInputTransportStale();
+        return;
+      }
       const socket = socketRef.current;
       if (transportRef.current === 'websocket' && socket?.readyState === WebSocket.OPEN) {
         try {
@@ -3229,6 +3299,7 @@ export default function CodexCliRoute() {
     clearQueuedTerminalOutput,
     closeTransports,
     fitAndNotify,
+    getPendingTerminalOutputChars,
     markInputTransportStale,
     queueHttpInput,
     queueReconnectInput,

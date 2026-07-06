@@ -1,5 +1,6 @@
 import { useRef, useState, useCallback, useEffect } from 'react';
 import copy from 'copy-to-clipboard';
+import { maskPrivateLocalPaths } from '~/utils/privatePathMask';
 
 export default function useCopyCode(codeRef: React.RefObject<HTMLElement | null>) {
   const [isCopied, setIsCopied] = useState(false);
@@ -18,7 +19,7 @@ export default function useCopyCode(codeRef: React.RefObject<HTMLElement | null>
 
     const wasFocused = document.activeElement === buttonRef.current;
     setIsCopied(true);
-    copy(codeString.trim(), { format: 'text/plain' });
+    copy(maskPrivateLocalPaths(codeString.trim()), { format: 'text/plain' });
 
     if (wasFocused) {
       requestAnimationFrame(() => buttonRef.current?.focus());

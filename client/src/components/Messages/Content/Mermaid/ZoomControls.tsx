@@ -5,6 +5,7 @@ import { Clipboard, CheckMark } from '@librechat/client';
 import { MIN_ZOOM, MAX_ZOOM } from './useMermaidZoom';
 import { useLocalize } from '~/hooks';
 import cn from '~/utils/cn';
+import { maskPrivateLocalPaths } from '~/utils/privatePathMask';
 
 interface ZoomControlsProps {
   zoom: number;
@@ -31,7 +32,7 @@ const ZoomControls: React.FC<ZoomControlsProps> = memo(
     }, []);
 
     const handleCopy = useCallback(() => {
-      copy(codeContent.trim(), { format: 'text/plain' });
+      copy(maskPrivateLocalPaths(codeContent.trim()), { format: 'text/plain' });
       setIsCopied(true);
       requestAnimationFrame(() => copyRef.current?.focus());
       clearTimeout(copyTimerRef.current);
