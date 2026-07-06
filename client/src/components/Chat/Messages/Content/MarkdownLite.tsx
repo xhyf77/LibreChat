@@ -1,4 +1,4 @@
-import { memo } from 'react';
+import { memo, useMemo } from 'react';
 import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
 import rehypeKatex from 'rehype-katex';
@@ -10,9 +10,11 @@ import { code, codeNoExecution, a, p, img, table } from './MarkdownComponents';
 import { CodeBlockProvider, ArtifactProvider } from '~/Providers';
 import MarkdownErrorBoundary from './MarkdownErrorBoundary';
 import { langSubset } from '~/utils';
+import { maskPrivateLocalPaths } from '~/utils/privatePathMask';
 
 const MarkdownLite = memo(
   ({ content = '', codeExecution = true }: { content?: string; codeExecution?: boolean }) => {
+    const privateContent = useMemo(() => maskPrivateLocalPaths(content), [content]);
     const rehypePlugins: PluggableList = [
       [rehypeKatex],
       [
@@ -26,7 +28,7 @@ const MarkdownLite = memo(
     ];
 
     return (
-      <MarkdownErrorBoundary content={content} codeExecution={codeExecution}>
+      <MarkdownErrorBoundary content={privateContent} codeExecution={codeExecution}>
         <ArtifactProvider>
           <CodeBlockProvider>
             <ReactMarkdown
@@ -50,7 +52,7 @@ const MarkdownLite = memo(
                 }
               }
             >
-              {content}
+              {privateContent}
             </ReactMarkdown>
           </CodeBlockProvider>
         </ArtifactProvider>

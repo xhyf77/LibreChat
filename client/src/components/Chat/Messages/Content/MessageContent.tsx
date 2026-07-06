@@ -12,6 +12,7 @@ import { useLocalize } from '~/hooks';
 import Container from './Container';
 import Markdown from './Markdown';
 import { cn } from '~/utils';
+import { maskPrivateLocalPaths } from '~/utils/privatePathMask';
 import store from '~/store';
 
 const ERROR_CONNECTION_TEXT = 'Error connecting to server, try refreshing the page.';
@@ -78,6 +79,8 @@ export const ErrorMessage = ({
   message,
   className = '',
 }: Pick<TDisplayProps, 'text' | 'className'> & { message?: TMessage }) => {
+  const privateText = useMemo(() => maskPrivateLocalPaths(text), [text]);
+
   if (text === ERROR_CONNECTION_TEXT) {
     return <ConnectionError message={message} />;
   }
@@ -85,7 +88,7 @@ export const ErrorMessage = ({
   return (
     <Container message={message}>
       <ErrorBox className={className}>
-        <Error text={text} />
+        <Error text={privateText} />
       </ErrorBox>
     </Container>
   );
@@ -94,6 +97,7 @@ export const ErrorMessage = ({
 const DisplayMessage = ({ text, isCreatedByUser, message, showCursor }: TDisplayProps) => {
   const { isSubmitting = false, isLatestMessage = false } = useMessageContext();
   const enableUserMsgMarkdown = useRecoilValue(store.enableUserMsgMarkdown);
+  const privateText = useMemo(() => maskPrivateLocalPaths(text), [text]);
 
   const showCursorState = useMemo(
     () => showCursor === true && isSubmitting,
@@ -102,13 +106,13 @@ const DisplayMessage = ({ text, isCreatedByUser, message, showCursor }: TDisplay
 
   const content = useMemo(() => {
     if (!isCreatedByUser) {
-      return <Markdown content={text} isLatestMessage={isLatestMessage} />;
+      return <Markdown content={privateText} isLatestMessage={isLatestMessage} />;
     }
     if (enableUserMsgMarkdown) {
-      return <MarkdownLite content={text} />;
+      return <MarkdownLite content={privateText} />;
     }
-    return <>{text}</>;
-  }, [isCreatedByUser, enableUserMsgMarkdown, text, isLatestMessage]);
+    return <>{privateText}</>;
+  }, [isCreatedByUser, enableUserMsgMarkdown, privateText, isLatestMessage]);
 
   return (
     <Container message={message}>
@@ -116,7 +120,7 @@ const DisplayMessage = ({ text, isCreatedByUser, message, showCursor }: TDisplay
         className={cn(
           'markdown prose message-content dark:prose-invert light w-full break-words',
           isSubmitting && 'submitting',
-          showCursorState && text.length > 0 && 'result-streaming',
+          showCursorState && privateText.length > 0 && 'result-streaming',
           isCreatedByUser && !enableUserMsgMarkdown && 'whitespace-pre-wrap',
           isCreatedByUser ? 'dark:text-gray-20' : 'dark:text-gray-100',
         )}

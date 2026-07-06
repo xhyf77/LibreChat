@@ -8,6 +8,7 @@ import { fontSizeAtom } from '~/store/fontSize';
 import { useMessageContext } from '~/Providers';
 import { useLocalize } from '~/hooks';
 import { cn } from '~/utils';
+import { maskPrivateLocalPaths } from '~/utils/privatePathMask';
 
 type SummaryProps = Pick<
   SummaryContentPart,
@@ -17,12 +18,16 @@ type SummaryProps = Pick<
 function useCopyToClipboard(content?: string) {
   const [isCopied, setIsCopied] = useState(false);
   const timerRef = useRef<ReturnType<typeof setTimeout>>();
+  const privateContent = useMemo(
+    () => (content ? maskPrivateLocalPaths(content) : ''),
+    [content],
+  );
   useEffect(() => () => clearTimeout(timerRef.current), []);
   const handleCopy = useCallback(
     (e: MouseEvent<HTMLButtonElement>) => {
       e.stopPropagation();
-      if (content) {
-        navigator.clipboard.writeText(content).then(
+      if (privateContent) {
+        navigator.clipboard.writeText(privateContent).then(
           () => {
             clearTimeout(timerRef.current);
             setIsCopied(true);
@@ -34,18 +39,22 @@ function useCopyToClipboard(content?: string) {
         );
       }
     },
-    [content],
+    [privateContent],
   );
   return { isCopied, handleCopy };
 }
 
 const SummaryContent = memo(({ children, meta }: { children: React.ReactNode; meta?: string }) => {
   const fontSize = useAtomValue(fontSizeAtom);
+  const privateChildren = useMemo(
+    () => (typeof children === 'string' ? maskPrivateLocalPaths(children) : children),
+    [children],
+  );
 
   return (
     <div className="relative rounded-3xl border border-border-medium bg-surface-tertiary p-4 pb-10 text-text-secondary">
       {meta && <span className="mb-1 block text-xs text-text-secondary">{meta}</span>}
-      <p className={cn('whitespace-pre-wrap leading-[26px]', fontSize)}>{children}</p>
+      <p className={cn('whitespace-pre-wrap leading-[26px]', fontSize)}>{privateChildren}</p>
     </div>
   );
 });
@@ -224,6 +233,7 @@ const Summary = memo(({ content, model, provider, tokenCount, summarizing }: Sum
         .join(''),
     [content],
   );
+  const privateText = useMemo(() => maskPrivateLocalPaths(text), [text]);
   const { isCopied, handleCopy } = useCopyToClipboard(text);
 
   const handleClick = useCallback((e: MouseEvent<HTMLButtonElement>) => {
@@ -285,7 +295,7 @@ const Summary = memo(({ content, model, provider, tokenCount, summarizing }: Sum
             isExpanded={isExpanded}
             onClick={handleClick}
             label={label}
-            content={text}
+            content={privateText}
             contentId={contentId}
             showCopyButton={!isActivelyStreaming}
             isCopied={isCopied}
@@ -303,11 +313,11 @@ const Summary = memo(({ content, model, provider, tokenCount, summarizing }: Sum
           }}
         >
           <div className="relative overflow-hidden">
-            <SummaryContent meta={meta}>{text}</SummaryContent>
+            <SummaryContent meta={meta}>{privateText}</SummaryContent>
             <FloatingSummaryBar
               isVisible={isBarVisible && isExpanded}
               onClick={handleClick}
-              content={text}
+              content={privateText}
               contentId={contentId}
               isCopied={isCopied}
               onCopy={handleCopy}

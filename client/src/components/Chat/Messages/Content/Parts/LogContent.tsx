@@ -13,6 +13,7 @@ import {
   renderAttachmentKey,
 } from './attachmentTypes';
 import { fileToArtifact, TOOL_ARTIFACT_TYPES } from '~/utils/artifacts';
+import { maskPrivateLocalPaths } from '~/utils/privatePathMask';
 import Image from '~/components/Chat/Messages/Content/Image';
 import ToolMermaidArtifact from './ToolMermaidArtifact';
 import ToolArtifactCard from './ToolArtifactCard';
@@ -47,7 +48,7 @@ const LogContent: React.FC<LogContentProps> = ({ output = '', renderImages, atta
     }
 
     const parts = output.split('Generated files:');
-    return parts[0].trim();
+    return maskPrivateLocalPaths(parts[0].trim());
   }, [output]);
 
   const {
@@ -144,9 +145,10 @@ const LogContent: React.FC<LogContentProps> = ({ output = '', renderImages, atta
     const isExpired = expiresAt ? isAfter(now, expiresAt) : false;
     const filename = file.filename || '';
     const visibleName = displayFilename(filename);
+    const privateVisibleName = maskPrivateLocalPaths(visibleName);
 
     if (isExpired) {
-      return `${visibleName} ${localize('com_download_expired')}`;
+      return `${privateVisibleName} ${localize('com_download_expired')}`;
     }
 
     const fileData = file as TFile & TAttachmentMetadata;
@@ -161,7 +163,7 @@ const LogContent: React.FC<LogContentProps> = ({ output = '', renderImages, atta
         source={fileData.source}
       >
         {'- '}
-        {visibleName} {localize('com_click_to_download')}
+        {privateVisibleName} {localize('com_click_to_download')}
       </LogLink>
     );
   };
@@ -218,16 +220,16 @@ const LogContent: React.FC<LogContentProps> = ({ output = '', renderImages, atta
                       file_id={file.file_id}
                       user={file.user}
                       source={file.source}
-                    >
-                      {displayFilename(file.filename)}
+                  >
+                      {maskPrivateLocalPaths(displayFilename(file.filename))}
                     </LogLink>
                   ) : (
-                    displayFilename(file.filename)
+                    maskPrivateLocalPaths(displayFilename(file.filename))
                   )}
                 </div>
               )}
               <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-words font-mono text-xs leading-5 text-text-primary">
-                {file.text}
+                {maskPrivateLocalPaths(file.text)}
               </pre>
             </div>
           ))}

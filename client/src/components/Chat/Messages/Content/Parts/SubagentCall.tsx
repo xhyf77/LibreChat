@@ -11,6 +11,7 @@ import type { SubagentTickerLine } from '~/utils/subagentContent';
 import ToolCallGroup from '~/components/Chat/Messages/Content/ToolCallGroup';
 import MarkdownLite from '~/components/Chat/Messages/Content/MarkdownLite';
 import { cn, groupSequentialToolCalls, parseToolName } from '~/utils';
+import { maskPrivateLocalPaths } from '~/utils/privatePathMask';
 import Container from '~/components/Chat/Messages/Content/Container';
 import ToolCall from '~/components/Chat/Messages/Content/ToolCall';
 import { MessageContext } from '~/Providers/MessageContext';
@@ -753,7 +754,7 @@ function TickerLineView({ line }: { line: SubagentTickerLine }): JSX.Element {
           dir="rtl"
           className="min-w-0 flex-1 overflow-hidden text-ellipsis whitespace-nowrap text-left"
         >
-          {line.body}
+          {maskPrivateLocalPaths(line.body)}
         </span>
       </li>
     );
@@ -771,7 +772,9 @@ function TickerLineView({ line }: { line: SubagentTickerLine }): JSX.Element {
             </span>
           ))}
           {line.argsSnippet && (
-            <span className="min-w-0 truncate text-text-tertiary">({line.argsSnippet})</span>
+            <span className="min-w-0 truncate text-text-tertiary">
+              ({maskPrivateLocalPaths(line.argsSnippet)})
+            </span>
           )}
         </span>
       </li>
@@ -786,7 +789,9 @@ function TickerLineView({ line }: { line: SubagentTickerLine }): JSX.Element {
           dir="rtl"
           className="min-w-0 flex-1 overflow-hidden text-ellipsis whitespace-nowrap text-left"
         >
-          {line.outputSnippet ?? localize('com_ui_subagent_ticker_tool_done')}
+          {line.outputSnippet
+            ? maskPrivateLocalPaths(line.outputSnippet)
+            : localize('com_ui_subagent_ticker_tool_done')}
         </span>
       </li>
     );
@@ -796,7 +801,7 @@ function TickerLineView({ line }: { line: SubagentTickerLine }): JSX.Element {
   return (
     <li className="flex w-full items-baseline gap-1 overflow-hidden text-text-warning">
       <span className="shrink-0">{errorPrefix}:</span>
-      <span className="min-w-0 flex-1 truncate">{line.message ?? ''}</span>
+      <span className="min-w-0 flex-1 truncate">{maskPrivateLocalPaths(line.message ?? '')}</span>
     </li>
   );
 }

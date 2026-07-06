@@ -22,6 +22,7 @@ import ToolArtifactCard from './ToolArtifactCard';
 import { useAttachmentLink } from './LogLink';
 import { useLocalize, useAttachmentPreviewSync, useExpandCollapse } from '~/hooks';
 import { cn, getFileType } from '~/utils';
+import { maskPrivateLocalPaths } from '~/utils/privatePathMask';
 
 const COLLAPSED_MAX_HEIGHT = 320;
 
@@ -62,6 +63,7 @@ const PreviewPlaceholderCard = memo(
     });
     const fileType = getFileType('artifact');
     const visibleFilename = displayFilename(attachment.filename);
+    const privateVisibleFilename = maskPrivateLocalPaths(visibleFilename);
     const subtitleText =
       status === 'pending'
         ? localize('com_ui_preview_preparing')
@@ -84,8 +86,8 @@ const PreviewPlaceholderCard = memo(
                   the pending→resolved transition is visually seamless. */}
               <FilePreview fileType={fileType} className="relative" />
               <div className="overflow-hidden text-left">
-                <div className="truncate font-medium" title={visibleFilename}>
-                  {visibleFilename}
+                <div className="truncate font-medium" title={privateVisibleFilename}>
+                  {privateVisibleFilename}
                 </div>
                 <div className="flex items-center gap-1.5 truncate text-xs text-text-secondary">
                   {status === 'pending' ? (
@@ -102,7 +104,7 @@ const PreviewPlaceholderCard = memo(
         <button
           type="button"
           onClick={handleDownload}
-          aria-label={`${localize('com_ui_download')} ${visibleFilename}`}
+          aria-label={`${localize('com_ui_download')} ${privateVisibleFilename}`}
           title={localize('com_ui_download')}
           className={cn(
             'flex shrink-0 items-center justify-center px-3 transition-colors duration-200',
@@ -189,7 +191,7 @@ const FileAttachment = memo(({ attachment }: { attachment: Partial<TAttachment> 
         file={attachment}
         onClick={handleDownload}
         overrideType={extension}
-        displayName={displayFilename(attachment.filename)}
+        displayName={maskPrivateLocalPaths(displayFilename(attachment.filename))}
         containerClassName="max-w-fit"
         buttonClassName="bg-surface-secondary hover:cursor-pointer hover:bg-surface-hover active:bg-surface-secondary focus:bg-surface-hover hover:border-border-heavy active:border-border-heavy"
       />
@@ -208,7 +210,9 @@ const FileAttachmentGroup = memo(({ attachments }: { attachments: TAttachment[] 
   );
   const count = visibleAttachments.length;
   const summary = useMemo(() => {
-    const names = visibleAttachments.map((attachment) => displayFilename(attachment.filename));
+    const names = visibleAttachments.map((attachment) =>
+      maskPrivateLocalPaths(displayFilename(attachment.filename)),
+    );
     if (names.length <= 2) {
       return names.join(', ');
     }
@@ -335,7 +339,12 @@ const TextAttachment = memo(
     });
     const extension = attachment.filename?.split('.').pop();
     const text = file.text ?? '';
+    const privateText = useMemo(() => maskPrivateLocalPaths(text), [text]);
     const visibleFilename = displayFilename(attachment.filename);
+    const privateVisibleFilename = useMemo(
+      () => maskPrivateLocalPaths(visibleFilename),
+      [visibleFilename],
+    );
 
     useEffect(() => {
       const timer = setTimeout(() => setIsVisible(true), 50);
@@ -348,7 +357,7 @@ const TextAttachment = memo(
         return;
       }
       setOverflowed(el.scrollHeight > COLLAPSED_MAX_HEIGHT + 1);
-    }, [text]);
+    }, [privateText]);
 
     const isClamped = overflowed && !expanded;
 
@@ -370,7 +379,7 @@ const TextAttachment = memo(
             file={attachment}
             onClick={handleDownload}
             overrideType={extension}
-            displayName={displayFilename(attachment.filename)}
+            displayName={privateVisibleFilename}
             containerClassName="max-w-fit"
             buttonClassName="bg-surface-secondary hover:cursor-pointer hover:bg-surface-hover active:bg-surface-secondary focus:bg-surface-hover hover:border-border-heavy active:border-border-heavy"
           />
@@ -378,14 +387,14 @@ const TextAttachment = memo(
         <div className="overflow-hidden rounded-lg bg-surface-secondary">
           {!showFileChip && (
             <div className="flex items-center justify-between gap-2 border-b border-border-light px-3 py-2">
-              <span className="min-w-0 truncate text-sm font-medium" title={visibleFilename}>
-                {visibleFilename}
+              <span className="min-w-0 truncate text-sm font-medium" title={privateVisibleFilename}>
+                {privateVisibleFilename}
               </span>
               {attachment.filepath && (
                 <button
                   type="button"
                   onClick={handleDownload}
-                  aria-label={`${localize('com_ui_download')} ${visibleFilename}`}
+                  aria-label={`${localize('com_ui_download')} ${privateVisibleFilename}`}
                   title={localize('com_ui_download')}
                   className="flex size-7 shrink-0 items-center justify-center rounded-md text-text-secondary transition-colors hover:bg-surface-hover hover:text-text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-border-heavy"
                 >
@@ -404,7 +413,7 @@ const TextAttachment = memo(
               )}
               style={isClamped ? { maxHeight: COLLAPSED_MAX_HEIGHT } : undefined}
             >
-              {text}
+              {privateText}
             </pre>
             {overflowed && (
               <button

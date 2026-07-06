@@ -15,6 +15,7 @@ import { displayFilename } from './attachmentTypes';
 import { useAttachmentLink } from './LogLink';
 import { useLocalize } from '~/hooks';
 import { cn, getFileType } from '~/utils';
+import { maskPrivateLocalPaths } from '~/utils/privatePathMask';
 import store from '~/store';
 
 interface ToolArtifactCardProps {
@@ -226,6 +227,8 @@ const ToolArtifactCard = memo(({ attachment, artifact }: ToolArtifactCardProps) 
   // tool artifacts, so re-derive the user-facing label rather than
   // showing the collision-suffixed name.
   const visibleTitle = displayFilename(artifact.title);
+  const privateVisibleFilename = maskPrivateLocalPaths(visibleFilename);
+  const privateVisibleTitle = maskPrivateLocalPaths(visibleTitle);
 
   return (
     <div className="group relative my-2 inline-flex max-w-fit items-stretch gap-px overflow-hidden rounded-xl text-sm text-text-primary shadow-sm">
@@ -245,8 +248,8 @@ const ToolArtifactCard = memo(({ attachment, artifact }: ToolArtifactCardProps) 
           <div className="flex flex-row items-center gap-2">
             <FilePreview fileType={fileType} className="relative" />
             <div className="overflow-hidden text-left">
-              <div className="truncate font-medium" title={visibleFilename}>
-                {visibleTitle}
+              <div className="truncate font-medium" title={privateVisibleFilename}>
+                {privateVisibleTitle}
               </div>
               <div className="truncate text-xs text-text-secondary">{actionLabel}</div>
             </div>
@@ -256,7 +259,7 @@ const ToolArtifactCard = memo(({ attachment, artifact }: ToolArtifactCardProps) 
       <button
         type="button"
         onClick={handleDownload}
-        aria-label={`${localize('com_ui_download')} ${visibleFilename}`}
+        aria-label={`${localize('com_ui_download')} ${privateVisibleFilename}`}
         title={localize('com_ui_download')}
         className={cn(
           'flex shrink-0 items-center justify-center px-3 transition-colors duration-200',

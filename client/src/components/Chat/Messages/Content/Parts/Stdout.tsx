@@ -1,4 +1,5 @@
 import { useMemo } from 'react';
+import { maskPrivateLocalPaths } from '~/utils/privatePathMask';
 
 interface StdoutProps {
   output?: string;
@@ -10,7 +11,7 @@ export default function Stdout({ output = '' }: StdoutProps) {
       return '';
     }
     const parts = output.split('Generated files:');
-    return parts[0].trim();
+    return maskPrivateLocalPaths(parts[0].trim());
   }, [output]);
 
   if (!processedContent) {

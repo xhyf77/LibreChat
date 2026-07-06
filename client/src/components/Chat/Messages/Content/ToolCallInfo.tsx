@@ -7,6 +7,7 @@ import { useOptionalMessagesOperations } from '~/Providers';
 import { useLocalize, useExpandCollapse } from '~/hooks';
 import UIResourceCarousel from './UIResourceCarousel';
 import { handleUIAction, cn } from '~/utils';
+import { maskPrivateLocalPaths } from '~/utils/privatePathMask';
 import { OutputRenderer } from './ToolOutput';
 
 function isSimpleObject(obj: unknown): obj is Record<string, string | number | boolean | null> {
@@ -30,7 +31,7 @@ function KeyValueInput({ data }: { data: Record<string, string | number | boolea
         <div key={key} className="flex items-baseline gap-1.5">
           <span className="font-medium text-text-secondary">{key}</span>
           <span className="rounded bg-surface-tertiary px-1.5 py-0.5 text-text-primary">
-            {String(value ?? 'null')}
+            {maskPrivateLocalPaths(String(value ?? 'null'))}
           </span>
         </div>
       ))}
@@ -43,12 +44,13 @@ function formatParamValue(value: unknown): string {
     return '';
   }
   if (typeof value === 'string') {
-    return value.length > 200 ? value.slice(0, 200) + '...' : value;
+    const masked = maskPrivateLocalPaths(value);
+    return masked.length > 200 ? masked.slice(0, 200) + '...' : masked;
   }
   if (typeof value !== 'object') {
     return String(value);
   }
-  const str = JSON.stringify(value);
+  const str = maskPrivateLocalPaths(JSON.stringify(value));
   return str.length > 200 ? str.slice(0, 200) + '...' : str;
 }
 
@@ -71,6 +73,7 @@ function InputRenderer({ input }: { input: string }) {
   if (!input || input.trim().length === 0) {
     return null;
   }
+  const privateInput = maskPrivateLocalPaths(input);
 
   try {
     const parsed = JSON.parse(input);
@@ -83,12 +86,14 @@ function InputRenderer({ input }: { input: string }) {
     // Valid JSON but not a plain object (array, string, number, boolean) — render formatted
     return (
       <pre className="whitespace-pre-wrap text-xs text-text-primary">
-        {typeof parsed === 'string' ? parsed : JSON.stringify(parsed, null, 2)}
+        {typeof parsed === 'string'
+          ? maskPrivateLocalPaths(parsed)
+          : maskPrivateLocalPaths(JSON.stringify(parsed, null, 2))}
       </pre>
     );
   } catch {
     // Not JSON — render as plain text
-    return <pre className="whitespace-pre-wrap text-xs text-text-primary">{input}</pre>;
+    return <pre className="whitespace-pre-wrap text-xs text-text-primary">{privateInput}</pre>;
   }
 }
 

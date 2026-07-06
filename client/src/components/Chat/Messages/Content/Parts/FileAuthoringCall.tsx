@@ -10,6 +10,7 @@ import { AttachmentGroup } from './Attachment';
 import { langFromPath } from './ReadFileCall';
 import { useLocalize } from '~/hooks';
 import { cn } from '~/utils';
+import { maskPrivateLocalPaths } from '~/utils/privatePathMask';
 
 type FileAuthoringToolName = 'create_file' | 'edit_file';
 
@@ -127,11 +128,14 @@ export default function FileAuthoringCall({
   const authoredContent = useMemo(() => parseJsonField(args, 'content'), [args]);
   const editArgsPreview = useMemo(() => buildEditArgsPreview(args), [args]);
   const fileName = filePath.split('/').pop() || filePath;
+  const privateFileName = useMemo(() => maskPrivateLocalPaths(fileName), [fileName]);
   const fileLang = useMemo(() => langFromPath(filePath), [filePath]);
   const argsPreview = isCreate ? authoredContent : editArgsPreview;
   const outputIsDiff = hasDiff(output);
   /** A diff in the output supersedes the args preview — it carries the input with real file context */
   const preview = outputIsDiff ? output : argsPreview || output;
+  const privatePreview = useMemo(() => maskPrivateLocalPaths(preview), [preview]);
+  const privateOutput = useMemo(() => maskPrivateLocalPaths(output), [output]);
   const showOutputSection = !!output && preview !== output;
   const previewIsDiff = outputIsDiff || (!isCreate && !!editArgsPreview && preview !== output);
   let previewLang = 'plaintext';
@@ -144,7 +148,7 @@ export default function FileAuthoringCall({
   const { showCode, toggleCode, expandStyle, expandRef, progress, cancelled, hasError } =
     useToolCallState(initialProgress, isSubmitting, output, !!filePath || !!preview, onExpand);
 
-  const highlighted = useLazyHighlight(preview || undefined, previewLang);
+  const highlighted = useLazyHighlight(privatePreview || undefined, previewLang);
   const Icon = isCreate ? FilePlus2 : FilePenLine;
 
   return (
@@ -154,12 +158,14 @@ export default function FileAuthoringCall({
           progress={progress}
           onClick={toggleCode}
           inProgressText={localize(isCreate ? 'com_ui_creating_file' : 'com_ui_editing_file', {
-            0: fileName,
+            0: privateFileName,
           })}
           finishedText={
             cancelled
               ? localize('com_ui_cancelled')
-              : localize(isCreate ? 'com_ui_created_file' : 'com_ui_edited_file', { 0: fileName })
+              : localize(isCreate ? 'com_ui_created_file' : 'com_ui_edited_file', {
+                  0: privateFileName,
+                })
           }
           errorSuffix={hasError && !cancelled ? localize('com_ui_tool_failed') : undefined}
           icon={
@@ -180,10 +186,13 @@ export default function FileAuthoringCall({
         <div className="overflow-hidden" ref={expandRef}>
           {!!preview && (
             <div className="my-2 overflow-hidden rounded-lg border border-border-light bg-surface-secondary">
-              <CodeWindowHeader language={previewIsDiff ? 'diff' : fileName} code={preview} />
+              <CodeWindowHeader
+                language={previewIsDiff ? 'diff' : privateFileName}
+                code={privatePreview}
+              />
               <pre className="max-h-[300px] overflow-auto bg-surface-chat p-4 font-mono text-xs dark:bg-surface-primary-alt">
                 <code className={`hljs language-${previewLang} !whitespace-pre`}>
-                  {highlighted ?? preview}
+                  {highlighted ?? privatePreview}
                 </code>
               </pre>
               {showOutputSection && (
@@ -193,7 +202,7 @@ export default function FileAuthoringCall({
                     hasError ? 'text-red-600 dark:text-red-400' : 'text-text-primary',
                   )}
                 >
-                  {output}
+                  {privateOutput}
                 </pre>
               )}
             </div>

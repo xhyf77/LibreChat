@@ -9,6 +9,7 @@ import { ToolIcon, OutputRenderer, isError } from './ToolOutput';
 import FilePreviewDialog from './FilePreviewDialog';
 import { sortPagesByRelevance, cn } from '~/utils';
 import { useGetFiles } from '~/data-provider';
+import { maskPrivateLocalPaths } from '~/utils/privatePathMask';
 import ProgressText from './ProgressText';
 import store from '~/store';
 
@@ -280,6 +281,7 @@ function FileHeader({
 }) {
   const localize = useLocalize();
   const IconComponent = getFileIcon(fileType);
+  const privateFileName = useMemo(() => maskPrivateLocalPaths(fileName), [fileName]);
   const sortedPages = pages && pageRelevance ? sortPagesByRelevance(pages, pageRelevance) : pages;
 
   return (
@@ -290,12 +292,14 @@ function FileHeader({
           type="button"
           onClick={onOpenPreview}
           className="min-w-0 truncate text-left text-xs font-medium text-text-primary underline decoration-border-medium underline-offset-2 transition-colors hover:text-text-secondary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-border-heavy focus-visible:ring-offset-1"
-          aria-label={`${localize('com_ui_preview')}: ${fileName}`}
+          aria-label={`${localize('com_ui_preview')}: ${privateFileName}`}
         >
-          {fileName}
+          {privateFileName}
         </button>
       ) : (
-        <span className="min-w-0 truncate text-xs font-medium text-text-primary">{fileName}</span>
+        <span className="min-w-0 truncate text-xs font-medium text-text-primary">
+          {privateFileName}
+        </span>
       )}
       {relevance > 0 && (
         <TooltipAnchor

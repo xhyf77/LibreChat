@@ -1,10 +1,11 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { useRecoilValue } from 'recoil';
 import { Terminal } from 'lucide-react';
 import { useProgress, useLocalize } from '~/hooks';
 import ProgressText from './ProgressText';
 import MarkdownLite from './MarkdownLite';
 import { cn } from '~/utils';
+import { maskPrivateLocalPaths } from '~/utils/privatePathMask';
 import store from '~/store';
 
 export default function CodeAnalyze({
@@ -45,6 +46,7 @@ export default function CodeAnalyze({
     }
     return acc;
   }, '');
+  const privateLogs = useMemo(() => maskPrivateLocalPaths(logs), [logs]);
 
   return (
     <>
@@ -70,7 +72,7 @@ export default function CodeAnalyze({
       {showCode && (
         <div className="code-analyze-block mb-3 mt-0.5 overflow-hidden rounded-xl bg-black">
           <MarkdownLite content={code ? `\`\`\`python\n${code}\n\`\`\`` : ''} />
-          {logs && (
+          {privateLogs && (
             <div className="bg-gray-700 p-4 text-xs">
               <div className="mb-1 text-gray-400">{localize('com_ui_result')}</div>
               <div
@@ -79,7 +81,7 @@ export default function CodeAnalyze({
                   color: 'white',
                 }}
               >
-                <pre className="shrink-0">{logs}</pre>
+                <pre className="shrink-0">{privateLogs}</pre>
               </div>
             </div>
           )}

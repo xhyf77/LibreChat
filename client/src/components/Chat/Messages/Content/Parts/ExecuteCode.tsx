@@ -9,6 +9,7 @@ import { AttachmentGroup } from './Attachment';
 import { useLocalize } from '~/hooks';
 import Stdout from './Stdout';
 import { cn } from '~/utils';
+import { maskPrivateLocalPaths } from '~/utils/privatePathMask';
 
 interface ParsedArgs {
   lang?: string;
@@ -69,11 +70,12 @@ export default function ExecuteCode({
 }) {
   const localize = useLocalize();
   const { lang = 'py', code } = useParseArgs(args) ?? ({} as ParsedArgs);
+  const privateCode = useMemo(() => maskPrivateLocalPaths(code), [code]);
 
   const { showCode, toggleCode, expandStyle, expandRef, progress, cancelled, hasError, hasOutput } =
     useToolCallState(initialProgress, isSubmitting, output, !!code, onExpand);
 
-  const highlighted = useLazyHighlight(code, lang);
+  const highlighted = useLazyHighlight(privateCode, lang);
   const outputHasError = useMemo(() => ERROR_PATTERNS.test(output), [output]);
 
   return (
@@ -96,7 +98,7 @@ export default function ExecuteCode({
               aria-hidden="true"
             />
           }
-          hasInput={!!code?.length}
+          hasInput={!!privateCode?.length}
           isExpanded={showCode}
           error={cancelled}
         />
@@ -104,8 +106,8 @@ export default function ExecuteCode({
       <div style={expandStyle}>
         <div className="overflow-hidden" ref={expandRef}>
           <div className="my-2 overflow-hidden rounded-lg border border-border-light bg-surface-secondary">
-            {code && <CodeWindowHeader language={lang} code={code} />}
-            {code && (
+            {privateCode && <CodeWindowHeader language={lang} code={privateCode} />}
+            {privateCode && (
               <pre className="max-h-[300px] overflow-auto bg-surface-chat p-4 font-mono text-xs dark:bg-surface-primary-alt">
                 <code className={`hljs language-${lang} !whitespace-pre`}>{highlighted}</code>
               </pre>
@@ -114,7 +116,7 @@ export default function ExecuteCode({
               <div
                 className={cn(
                   'bg-surface-primary-alt p-4 text-xs dark:bg-transparent',
-                  code && 'border-t border-border-light',
+                  privateCode && 'border-t border-border-light',
                 )}
               >
                 <div className="mb-1.5 text-[10px] font-medium uppercase tracking-wide text-text-secondary">

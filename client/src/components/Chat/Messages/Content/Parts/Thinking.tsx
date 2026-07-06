@@ -7,6 +7,7 @@ import { useLocalize, useExpandCollapse } from '~/hooks';
 import { showThinkingAtom } from '~/store/showThinking';
 import { fontSizeAtom } from '~/store/fontSize';
 import { cn } from '~/utils';
+import { maskPrivateLocalPaths } from '~/utils/privatePathMask';
 
 /**
  * ThinkingContent - Displays the actual thinking/reasoning content
@@ -16,10 +17,14 @@ export const ThinkingContent: FC<{
   children: React.ReactNode;
 }> = memo(({ children }) => {
   const fontSize = useAtomValue(fontSizeAtom);
+  const privateChildren = useMemo(
+    () => (typeof children === 'string' ? maskPrivateLocalPaths(children) : children),
+    [children],
+  );
 
   return (
     <div className="relative rounded-lg border border-border-light bg-surface-secondary p-3 pb-8 text-text-secondary">
-      <p className={cn('whitespace-pre-wrap leading-[26px]', fontSize)}>{children}</p>
+      <p className={cn('whitespace-pre-wrap leading-[26px]', fontSize)}>{privateChildren}</p>
     </div>
   );
 });
@@ -49,17 +54,21 @@ export const ThinkingButton = memo(
     const fontSize = useAtomValue(fontSizeAtom);
 
     const [isCopied, setIsCopied] = useState(false);
+    const privateContent = useMemo(
+      () => (content ? maskPrivateLocalPaths(content) : ''),
+      [content],
+    );
 
     const handleCopy = useCallback(
       (e: MouseEvent<HTMLButtonElement>) => {
         e.stopPropagation();
-        if (content) {
-          navigator.clipboard.writeText(content);
+        if (privateContent) {
+          navigator.clipboard.writeText(privateContent);
           setIsCopied(true);
           setTimeout(() => setIsCopied(false), 2000);
         }
       },
-      [content],
+      [privateContent],
     );
 
     return (
@@ -145,17 +154,21 @@ export const FloatingThinkingBar = memo(
   }) => {
     const localize = useLocalize();
     const [isCopied, setIsCopied] = useState(false);
+    const privateContent = useMemo(
+      () => (content ? maskPrivateLocalPaths(content) : ''),
+      [content],
+    );
 
     const handleCopy = useCallback(
       (e: MouseEvent<HTMLButtonElement>) => {
         e.stopPropagation();
-        if (content) {
-          navigator.clipboard.writeText(content);
+        if (privateContent) {
+          navigator.clipboard.writeText(privateContent);
           setIsCopied(true);
           setTimeout(() => setIsCopied(false), 2000);
         }
       },
-      [content],
+      [privateContent],
     );
 
     const collapseTooltip = isExpanded

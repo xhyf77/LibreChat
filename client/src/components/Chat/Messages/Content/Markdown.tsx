@@ -4,6 +4,7 @@ import { getRemarkPlugins, getRehypePlugins, getMarkdownComponents } from './mar
 import MarkdownErrorBoundary from './MarkdownErrorBoundary';
 import MarkdownBlocks from './MarkdownBlocks';
 import { preprocessLaTeX } from '~/utils';
+import { maskPrivateLocalPaths } from '~/utils/privatePathMask';
 import store from '~/store';
 
 type TContentProps = {
@@ -13,14 +14,15 @@ type TContentProps = {
 
 const Markdown = memo(function Markdown({ content = '', isLatestMessage }: TContentProps) {
   const LaTeXParsing = useRecoilValue<boolean>(store.LaTeXParsing);
-  const isInitializing = content === '';
+  const privateContent = useMemo(() => maskPrivateLocalPaths(content), [content]);
+  const isInitializing = privateContent === '';
 
   const currentContent = useMemo(() => {
     if (isInitializing) {
       return '';
     }
-    return LaTeXParsing ? preprocessLaTeX(content) : content;
-  }, [content, LaTeXParsing, isInitializing]);
+    return LaTeXParsing ? preprocessLaTeX(privateContent) : privateContent;
+  }, [privateContent, LaTeXParsing, isInitializing]);
 
   if (isInitializing) {
     return (
@@ -33,7 +35,7 @@ const Markdown = memo(function Markdown({ content = '', isLatestMessage }: TCont
   }
 
   return (
-    <MarkdownErrorBoundary content={content} codeExecution={true}>
+    <MarkdownErrorBoundary content={privateContent} codeExecution={true}>
       <MarkdownBlocks
         content={currentContent}
         remarkPlugins={getRemarkPlugins()}

@@ -8,6 +8,7 @@ import { displayFilename } from './attachmentTypes';
 import { useAttachmentLink } from './LogLink';
 import { useLocalize } from '~/hooks';
 import { cn } from '~/utils';
+import { maskPrivateLocalPaths } from '~/utils/privatePathMask';
 import store from '~/store';
 
 interface ToolMermaidArtifactProps {
@@ -51,6 +52,8 @@ const ToolMermaidArtifact = memo(({ attachment, text }: ToolMermaidArtifactProps
   }
 
   const visibleFilename = displayFilename(attachment.filename);
+  const privateVisibleFilename = maskPrivateLocalPaths(visibleFilename);
+  const privateText = maskPrivateLocalPaths(text);
 
   return (
     <div className="my-2 flex w-full flex-col gap-1">
@@ -59,16 +62,16 @@ const ToolMermaidArtifact = memo(({ attachment, text }: ToolMermaidArtifactProps
           {attachment.filename && (
             <div
               className="truncate text-[10px] font-medium uppercase tracking-wide text-text-secondary"
-              title={visibleFilename}
+              title={privateVisibleFilename}
             >
-              {visibleFilename}
+              {privateVisibleFilename}
             </div>
           )}
           {attachment.filepath && (
             <button
               type="button"
               onClick={handleDownload}
-              aria-label={`${localize('com_ui_download')} ${visibleFilename}`}
+              aria-label={`${localize('com_ui_download')} ${privateVisibleFilename}`}
               title={localize('com_ui_download')}
               className={cn(
                 'inline-flex shrink-0 items-center gap-1 rounded-md px-2 py-1 text-xs',
@@ -84,7 +87,11 @@ const ToolMermaidArtifact = memo(({ attachment, text }: ToolMermaidArtifactProps
       )}
       {/* `id` is optional on Mermaid; pass only when we have a real file_id
           so the component generates a unique render target on its own. */}
-      {file.file_id ? <Mermaid id={file.file_id}>{text}</Mermaid> : <Mermaid>{text}</Mermaid>}
+      {file.file_id ? (
+        <Mermaid id={file.file_id}>{privateText}</Mermaid>
+      ) : (
+        <Mermaid>{privateText}</Mermaid>
+      )}
     </div>
   );
 });

@@ -15,10 +15,12 @@ import {
 import { apiBaseUrl, request } from 'librechat-data-provider';
 import { useAuthContext } from '~/hooks';
 import { createTerminalSessionPath } from '~/utils';
+import { rememberPrivatePathAliases } from '~/utils/privatePathMask';
 
 const repoPath = '~/work/example-repo';
 const terminalPollIntervalMs = 4000;
 const endedTerminalTombstoneMs = 10_000;
+const hiddenTerminalCwdLabel = 'cwd hidden';
 
 type TerminalSession = {
   sessionId: string;
@@ -101,11 +103,11 @@ export default function HomeRoute() {
           endedSessionIdsRef.current.delete(sessionId);
         }
       }
-      setSessions(
-        (data.sessions ?? []).filter(
-          (session) => !session.exited && !endedSessionIdsRef.current.has(terminalSessionKey(session)),
-        ),
+      const activeSessions = (data.sessions ?? []).filter(
+        (session) => !session.exited && !endedSessionIdsRef.current.has(terminalSessionKey(session)),
       );
+      activeSessions.forEach((session) => rememberPrivatePathAliases(session.cwd));
+      setSessions(activeSessions);
     } catch {
       setSessionError('Unable to load terminals');
     } finally {
@@ -277,7 +279,9 @@ export default function HomeRoute() {
                             <span>{session.clients} client{session.clients === 1 ? '' : 's'}</span>
                             <span>{session.mode}</span>
                           </div>
-                          <p className="mt-1 truncate text-xs text-[#696c77]">{session.cwd}</p>
+                          <p className="mt-1 truncate text-xs text-[#696c77]">
+                            {hiddenTerminalCwdLabel}
+                          </p>
                         </Link>
                         <div className="flex items-center justify-end gap-2">
                           <Link

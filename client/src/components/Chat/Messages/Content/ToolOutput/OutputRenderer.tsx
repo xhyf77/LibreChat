@@ -3,6 +3,7 @@ import copy from 'copy-to-clipboard';
 import CopyButton from '~/components/Messages/Content/CopyButton';
 import { useLocalize } from '~/hooks';
 import { cn } from '~/utils';
+import { maskPrivateLocalPaths } from '~/utils/privatePathMask';
 
 interface ContentBlock {
   type?: string;
@@ -91,7 +92,9 @@ interface OutputRendererProps {
 
 export default function OutputRenderer({ text }: OutputRendererProps) {
   const localize = useLocalize();
-  const { text: displayText, rawError, error, isJson } = useMemo(() => extractText(text), [text]);
+  const { text: extractedText, rawError, error, isJson } = useMemo(() => extractText(text), [text]);
+  const displayText = useMemo(() => maskPrivateLocalPaths(extractedText), [extractedText]);
+  const privateRawError = useMemo(() => maskPrivateLocalPaths(rawError), [rawError]);
   const [isExpanded, setIsExpanded] = useState(false);
   const [showErrorDetails, setShowErrorDetails] = useState(false);
   const [isCopied, setIsCopied] = useState(false);
@@ -149,7 +152,7 @@ export default function OutputRenderer({ text }: OutputRendererProps) {
           {isExpanded ? localize('com_ui_show_less') : localize('com_ui_show_more')}
         </button>
       )}
-      {error && rawError && rawError !== displayText && (
+      {error && privateRawError && privateRawError !== displayText && (
         <button
           type="button"
           className="mt-1 block text-xs text-text-secondary underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-border-heavy"
@@ -158,9 +161,9 @@ export default function OutputRenderer({ text }: OutputRendererProps) {
           {localize('com_ui_details')}
         </button>
       )}
-      {showErrorDetails && rawError && (
+      {showErrorDetails && privateRawError && (
         <pre className="mt-2 max-h-[200px] overflow-auto whitespace-pre-wrap break-words font-mono text-xs text-red-600 dark:text-red-400">
-          {rawError}
+          {privateRawError}
         </pre>
       )}
     </div>

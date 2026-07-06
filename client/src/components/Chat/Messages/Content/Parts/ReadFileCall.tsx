@@ -9,6 +9,7 @@ import { AttachmentGroup } from './Attachment';
 import parseJsonField from './parseJsonField';
 import { useLocalize } from '~/hooks';
 import { cn } from '~/utils';
+import { maskPrivateLocalPaths } from '~/utils/privatePathMask';
 
 const LANG_MAP: Record<string, string> = {
   py: 'python',
@@ -81,12 +82,14 @@ export default function ReadFileCall({
   const localize = useLocalize();
   const filePath = useMemo(() => parseJsonField(args, 'file_path'), [args]);
   const fileName = filePath.split('/').pop() || filePath;
+  const privateFileName = useMemo(() => maskPrivateLocalPaths(fileName), [fileName]);
+  const privateOutput = useMemo(() => maskPrivateLocalPaths(output), [output]);
   const lang = useMemo(() => langFromPath(filePath), [filePath]);
 
   const { showCode, toggleCode, expandStyle, expandRef, progress, cancelled, hasError, hasOutput } =
     useToolCallState(initialProgress, isSubmitting, output, !!filePath, onExpand);
 
-  const highlighted = useLazyHighlight(hasOutput ? output : undefined, lang);
+  const highlighted = useLazyHighlight(hasOutput ? privateOutput : undefined, lang);
 
   return (
     <>
@@ -94,9 +97,11 @@ export default function ReadFileCall({
         <ProgressText
           progress={progress}
           onClick={toggleCode}
-          inProgressText={localize('com_ui_reading_file', { 0: fileName })}
+          inProgressText={localize('com_ui_reading_file', { 0: privateFileName })}
           finishedText={
-            cancelled ? localize('com_ui_cancelled') : localize('com_ui_read_file', { 0: fileName })
+            cancelled
+              ? localize('com_ui_cancelled')
+              : localize('com_ui_read_file', { 0: privateFileName })
           }
           errorSuffix={hasError && !cancelled ? localize('com_ui_tool_failed') : undefined}
           icon={
@@ -117,10 +122,10 @@ export default function ReadFileCall({
         <div className="overflow-hidden" ref={expandRef}>
           {hasOutput && (
             <div className="my-2 overflow-hidden rounded-lg border border-border-light bg-surface-secondary">
-              <CodeWindowHeader language={fileName} code={output} />
+              <CodeWindowHeader language={privateFileName} code={privateOutput} />
               <pre className="max-h-[300px] overflow-auto bg-surface-chat p-4 font-mono text-xs dark:bg-surface-primary-alt">
                 <code className={`hljs language-${lang} !whitespace-pre`}>
-                  {highlighted ?? output}
+                  {highlighted ?? privateOutput}
                 </code>
               </pre>
             </div>

@@ -5,6 +5,7 @@ import { Download } from 'lucide-react';
 import { OGDialog, OGDialogContent, OGDialogTitle, OGDialogDescription } from '@librechat/client';
 import CopyButton from '~/components/Messages/Content/CopyButton';
 import { logger, sortPagesByRelevance, triggerDownload } from '~/utils';
+import { maskPrivateLocalPaths } from '~/utils/privatePathMask';
 import { useFileDownload } from '~/data-provider';
 import { useLocalize } from '~/hooks';
 import store from '~/store';
@@ -236,11 +237,16 @@ export default function FilePreviewDialog({
     if (!fileContent) {
       return;
     }
-    copy(fileContent, { format: 'text/plain' });
+    copy(maskPrivateLocalPaths(fileContent), { format: 'text/plain' });
     setIsCopied(true);
     setTimeout(() => setIsCopied(false), 3000);
   }, [fileContent]);
 
+  const privateFileName = useMemo(() => maskPrivateLocalPaths(fileName), [fileName]);
+  const privateFileContent = useMemo(
+    () => (fileContent ? maskPrivateLocalPaths(fileContent) : ''),
+    [fileContent],
+  );
   const displayType = useMemo(() => getDisplayType(fileType, fileName), [fileType, fileName]);
   const sortedPages = useMemo(
     () => (pages && pageRelevance ? sortPagesByRelevance(pages, pageRelevance) : pages),
@@ -265,7 +271,7 @@ export default function FilePreviewDialog({
         showCloseButton={true}
       >
         <div className="shrink-0 px-6 pr-12 pt-6">
-          <OGDialogTitle className="truncate text-base">{fileName}</OGDialogTitle>
+          <OGDialogTitle className="truncate text-base">{privateFileName}</OGDialogTitle>
           <div className="mt-0.5 flex items-center gap-3">
             <OGDialogDescription className="min-w-0 truncate">
               {metaParts.join(' · ')}
@@ -275,7 +281,7 @@ export default function FilePreviewDialog({
                 type="button"
                 onClick={handleDownload}
                 className="inline-flex shrink-0 items-center gap-1 text-xs text-text-secondary transition-colors hover:text-text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-border-heavy"
-                aria-label={`${localize('com_ui_download')} ${fileName}`}
+                aria-label={`${localize('com_ui_download')} ${privateFileName}`}
               >
                 <Download className="size-3" aria-hidden="true" />
                 {localize('com_ui_download')}
@@ -302,7 +308,7 @@ export default function FilePreviewDialog({
           {fileBlobUrl && (
             <iframe
               src={fileBlobUrl}
-              title={`${localize('com_ui_preview')}: ${fileName}`}
+              title={`${localize('com_ui_preview')}: ${privateFileName}`}
               className="h-[70vh] w-full rounded-lg border border-border-light"
             />
           )}
@@ -319,7 +325,7 @@ export default function FilePreviewDialog({
               </div>
               <div className="-mt-8 rounded-lg bg-surface-secondary p-4">
                 <pre className="whitespace-pre-wrap break-words pr-8 font-mono text-sm leading-6 text-text-primary">
-                  {fileContent}
+                  {privateFileContent}
                 </pre>
               </div>
             </>

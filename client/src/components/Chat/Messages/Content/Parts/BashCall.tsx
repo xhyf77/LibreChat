@@ -11,6 +11,7 @@ import { AttachmentGroup } from './Attachment';
 import parseJsonField, { areToolCallArgsComplete } from './parseJsonField';
 import { useLocalize } from '~/hooks';
 import { cn } from '~/utils';
+import { maskPrivateLocalPaths } from '~/utils/privatePathMask';
 
 export default function BashCall({
   isSubmitting,
@@ -33,12 +34,14 @@ export default function BashCall({
 }) {
   const localize = useLocalize();
   const command = useMemo(() => parseJsonField(args, commandField), [args, commandField]);
+  const privateCommand = useMemo(() => maskPrivateLocalPaths(command), [command]);
+  const privateOutput = useMemo(() => maskPrivateLocalPaths(output), [output]);
   const isWritingCommand = !command || !areToolCallArgsComplete(args);
 
   const { showCode, toggleCode, expandStyle, expandRef, progress, cancelled, hasError, hasOutput } =
     useToolCallState(initialProgress, isSubmitting, output, !!command, onExpand);
 
-  const highlighted = useLazyHighlight(command || undefined, 'bash');
+  const highlighted = useLazyHighlight(privateCommand || undefined, 'bash');
   const outputHasError = useMemo(() => ERROR_PATTERNS.test(output), [output]);
 
   const [isCopied, setIsCopied] = useState(false);
@@ -47,10 +50,10 @@ export default function BashCall({
 
   const handleCopy = useCallback(() => {
     setIsCopied(true);
-    copy(command, { format: 'text/plain' });
+    copy(privateCommand, { format: 'text/plain' });
     clearTimeout(timerRef.current);
     timerRef.current = setTimeout(() => setIsCopied(false), 3000);
-  }, [command]);
+  }, [privateCommand]);
 
   return (
     <>
@@ -76,7 +79,7 @@ export default function BashCall({
               )}
             />
           }
-          hasInput={!!command || hasOutput}
+          hasInput={!!privateCommand || hasOutput}
           isExpanded={showCode}
           error={cancelled}
         />
@@ -84,7 +87,7 @@ export default function BashCall({
       <div style={expandStyle}>
         <div className="overflow-hidden" ref={expandRef}>
           <div className="my-2 overflow-hidden rounded-lg border border-border-light">
-            {command && (
+            {privateCommand && (
               <div className="relative max-h-[300px] overflow-auto bg-surface-tertiary dark:bg-gray-950">
                 <CopyButton
                   iconOnly
@@ -97,19 +100,19 @@ export default function BashCall({
                   <span className="select-none text-text-tertiary" aria-hidden="true">
                     {'$ '}
                   </span>
-                  <code className="hljs language-bash">{highlighted ?? command}</code>
+                  <code className="hljs language-bash">{highlighted ?? privateCommand}</code>
                 </pre>
               </div>
             )}
             {hasOutput && (
-              <div className={cn(command && 'border-t border-border-light')}>
+              <div className={cn(privateCommand && 'border-t border-border-light')}>
                 <pre
                   className={cn(
                     'max-h-[300px] overflow-auto whitespace-pre-wrap break-words px-3 py-2.5 font-mono text-xs',
                     outputHasError ? 'text-red-600 dark:text-red-400' : 'text-text-primary',
                   )}
                 >
-                  {output}
+                  {privateOutput}
                 </pre>
               </div>
             )}

@@ -6,6 +6,7 @@ import { SerializeAddon } from '@xterm/addon-serialize';
 import { WebglAddon } from '@xterm/addon-webgl';
 import { apiBaseUrl, request } from 'librechat-data-provider';
 import copyToClipboard from 'copy-to-clipboard';
+import { Eye } from 'lucide-react';
 import { useAuthContext } from '~/hooks';
 import {
   clearHttpTerminalFallback,
@@ -14,6 +15,7 @@ import {
   rememberHttpTerminalFallback,
   shouldStartTerminalWithHttpFallback,
 } from '~/utils';
+import { rememberPrivatePathAliases } from '~/utils/privatePathMask';
 import '@fontsource/jetbrains-mono/400.css';
 import '@fontsource/jetbrains-mono/700.css';
 import '@xterm/xterm/css/xterm.css';
@@ -170,6 +172,82 @@ const terminalWebglStorageKey = 'ruc-terminal-webgl';
 const terminalInputStorageKey = 'ruc-terminal-input';
 const terminalDebugRefreshMs = 1000;
 const terminalBlankRecoveryMinIntervalMs = 1500;
+const terminalCodexStatusTailMaxChars = 512;
+const terminalPrivatePathMask = '[cwd hidden]';
+const terminalPrivatePathMaskFill = '.';
+const terminalPrivatePathAliasMinChars = 4;
+const terminalCwdRevealKey = 'F2';
+const terminalCodexStatusSeparatorChars = '·•∙';
+const terminalCodexStatusSeparatorSource = `[${terminalCodexStatusSeparatorChars}]`;
+const terminalAnsiSequenceSource =
+  '\\x1b(?:\\[[0-?]*[ -/]*[@-~]|\\][^\\x07]*(?:\\x07|\\x1b\\\\)|.)';
+const terminalAnsiSequenceAtPattern = new RegExp(`^(?:${terminalAnsiSequenceSource})`);
+const terminalPrivatePathPrefixSource =
+  `(^|[\\s${terminalCodexStatusSeparatorChars}"'\\\`([{<:=,;，。；：](?:${terminalAnsiSequenceSource})*)`;
+const terminalVisiblePrivatePathPrefixSource =
+  `(^|[\\s${terminalCodexStatusSeparatorChars}"'\\\`([{<:=,;，。；：])`;
+const terminalPrivatePathBoundarySource = `(?=$|[/\\s"'\\\`)\\]}>:;,，。；：])`;
+const terminalHomeRelativePathTokenSource = '~\\/[^\\s"\'`\\)\\]}>\\x1b]+';
+const terminalAbsoluteHomePathTokenSource =
+  '\\/home\\/[^\\/\\s"\'`\\)\\]}>\\x1b]+\\/[^\\s"\'`\\)\\]}>\\x1b]+';
+const terminalPrivatePathFragmentTokenSource = '(?:~(?:\\/[^\\s"\'`\\)\\]}>\\x1b]*)?|\\/[^\\s"\'`\\)\\]}>\\x1b]*)';
+const terminalHomeRelativePathPattern = new RegExp(
+  `${terminalPrivatePathPrefixSource}(${terminalHomeRelativePathTokenSource})`,
+  'g',
+);
+const terminalAbsoluteHomePathPattern = new RegExp(
+  `${terminalPrivatePathPrefixSource}(${terminalAbsoluteHomePathTokenSource})`,
+  'g',
+);
+const terminalStatusPrivatePathPattern = new RegExp(
+  `(·(?:${terminalAnsiSequenceSource})*\\s*(?:${terminalAnsiSequenceSource})*)` +
+    `(${terminalHomeRelativePathTokenSource}|${terminalAbsoluteHomePathTokenSource})`,
+  'g',
+);
+const terminalAnsiSequencePattern = new RegExp(terminalAnsiSequenceSource, 'g');
+const terminalVisibleSpaceSource = `(?:\\s|${terminalAnsiSequenceSource})+`;
+const terminalVisibleOptionalSpaceSource = `(?:\\s|${terminalAnsiSequenceSource})*`;
+const terminalCodexStatusModelSource = '(?:gpt-[A-Za-z0-9._-]+|o[0-9][A-Za-z0-9._-]*)';
+const terminalCodexStatusEffortSource = '(?:xhigh|high|medium|low|minimal)';
+const terminalCodexStatusOptionsSource = '(?:\\s+[A-Za-z0-9._-]+){0,2}';
+const terminalCodexStatusPlainPrefixSource =
+  `\\b${terminalCodexStatusModelSource}\\s+${terminalCodexStatusEffortSource}` +
+  `${terminalCodexStatusOptionsSource}\\s+${terminalCodexStatusSeparatorSource}`;
+const terminalCodexStatusPrivatePathPattern = new RegExp(
+  `${terminalCodexStatusPlainPrefixSource}\\s+` +
+    `(${terminalHomeRelativePathTokenSource}|${terminalAbsoluteHomePathTokenSource})`,
+  'g',
+);
+const terminalCodexStatusTrailingPathFragmentPattern = new RegExp(
+  `${terminalCodexStatusPlainPrefixSource}\\s+(${terminalPrivatePathFragmentTokenSource})$`,
+);
+const terminalCodexStatusPathLeadPattern = new RegExp(
+  `${terminalCodexStatusPlainPrefixSource}\\s*$`,
+);
+const terminalLeadingPrivatePathPattern = new RegExp(
+  `^((?:${terminalAnsiSequenceSource})*\\s*(?:${terminalAnsiSequenceSource})*)` +
+    `(${terminalHomeRelativePathTokenSource}|${terminalAbsoluteHomePathTokenSource})`,
+  'g',
+);
+const terminalLeadingPathContinuationPattern = new RegExp(
+  `^((?:${terminalAnsiSequenceSource})*)([^\\s"'\\\`)\\]}>\\x1b]+)`,
+  'g',
+);
+const terminalLeadingPathFragmentPattern = new RegExp(
+  `^((?:${terminalAnsiSequenceSource})*\\s*(?:${terminalAnsiSequenceSource})*)` +
+    `(${terminalPrivatePathFragmentTokenSource})`,
+  'g',
+);
+const terminalCodexStatusPrivatePathMaskPattern = new RegExp(
+  `((?:(?:^|[^A-Za-z0-9._-])(?:${terminalAnsiSequenceSource})*|(?:${terminalAnsiSequenceSource})+)` +
+    `${terminalCodexStatusModelSource}${terminalVisibleSpaceSource}` +
+    `${terminalCodexStatusEffortSource}` +
+    `(?:${terminalVisibleSpaceSource}[A-Za-z0-9._-]+){0,2}` +
+    `${terminalVisibleSpaceSource}${terminalCodexStatusSeparatorSource}` +
+    `${terminalVisibleOptionalSpaceSource})` +
+    `(${terminalHomeRelativePathTokenSource}|${terminalAbsoluteHomePathTokenSource})`,
+  'g',
+);
 
 function createTerminalDebugMetrics(): TerminalDebugMetrics {
   return {
@@ -206,6 +284,534 @@ function getTerminalOutputBytes(data: string) {
   }
   terminalOutputEncoder ??= new TextEncoder();
   return terminalOutputEncoder.encode(data).length;
+}
+
+function escapeRegExp(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function normalizeTerminalPath(value: string) {
+  return value.trim().replace(/\\/g, '/').replace(/\/+$/, '');
+}
+
+function getTerminalPrivatePathAliases(cwd: string) {
+  const normalized = normalizeTerminalPath(cwd);
+  if (!normalized || normalized === '/') {
+    return [];
+  }
+
+  const aliases = new Set<string>([normalized]);
+  const homeMatch = normalized.match(/^\/home\/[^/]+(?=\/|$)/);
+  if (homeMatch) {
+    const suffix = normalized.slice(homeMatch[0].length);
+    if (suffix) {
+      aliases.add(`~${suffix}`);
+    }
+  }
+  const pathParts = normalized.split('/').filter(Boolean);
+  for (let index = 2; index < pathParts.length; index += 1) {
+    const suffix = `/${pathParts.slice(index).join('/')}`;
+    if (suffix.length >= terminalPrivatePathAliasMinChars) {
+      aliases.add(suffix);
+    }
+  }
+
+  return [...aliases]
+    .filter((alias) => alias.length > 1)
+    .sort((left, right) => right.length - left.length);
+}
+
+function maskTerminalPathToken(prefix: string, pathToken: string) {
+  if (pathToken.length <= terminalPrivatePathMask.length) {
+    return `${prefix}${terminalPrivatePathMask.slice(0, Math.max(1, pathToken.length))}`;
+  }
+  // Avoid space padding here: WebGL can leave old glyphs visible for blank cells.
+  return `${prefix}${terminalPrivatePathMask}${terminalPrivatePathMaskFill.repeat(
+    pathToken.length - terminalPrivatePathMask.length,
+  )}`;
+}
+
+function maskExactTerminalPathAlias(data: string, alias: string) {
+  const aliasPattern = new RegExp(
+    `${terminalPrivatePathPrefixSource}(${escapeRegExp(alias)})${terminalPrivatePathBoundarySource}`,
+    'g',
+  );
+  return data.replace(aliasPattern, (_match: string, prefix: string, pathToken: string) =>
+    maskTerminalPathToken(prefix, pathToken),
+  );
+}
+
+function expandTerminalHomePath(pathToken: string, cwd: string) {
+  if (!pathToken.startsWith('~/')) {
+    return pathToken;
+  }
+  const homeMatch = normalizeTerminalPath(cwd).match(/^\/home\/[^/]+(?=\/|$)/);
+  if (!homeMatch) {
+    return pathToken;
+  }
+  return `${homeMatch[0]}${pathToken.slice(1)}`;
+}
+
+function collectTerminalPathMatches(
+  paths: string[],
+  data: string,
+  pattern: RegExp,
+  cwd: string,
+) {
+  pattern.lastIndex = 0;
+  for (const match of data.matchAll(pattern)) {
+    const pathToken = match[2];
+    if (pathToken) {
+      paths.push(expandTerminalHomePath(pathToken, cwd));
+    }
+  }
+}
+
+function stripTerminalAnsiSequences(data: string) {
+  terminalAnsiSequencePattern.lastIndex = 0;
+  return data.replace(terminalAnsiSequencePattern, '');
+}
+
+function getTerminalPathMatchingText(data: string) {
+  return stripTerminalAnsiSequences(data).replace(/[\x00-\x1f\x7f]+/g, '');
+}
+
+function getTerminalAnsiSequenceLengthAt(data: string, index: number) {
+  if (data.charCodeAt(index) !== 0x1b) {
+    return 0;
+  }
+  const match = terminalAnsiSequenceAtPattern.exec(data.slice(index));
+  return match?.[0]?.length ?? 1;
+}
+
+function getTerminalVisibleTextMap(data: string) {
+  let visible = '';
+  const originalIndexes: number[] = [];
+  let index = 0;
+  while (index < data.length) {
+    const ansiLength = getTerminalAnsiSequenceLengthAt(data, index);
+    if (ansiLength > 0) {
+      index += ansiLength;
+      continue;
+    }
+
+    const char = data[index];
+    const charCode = char.charCodeAt(0);
+    if (charCode < 0x20 || charCode === 0x7f) {
+      index += 1;
+      continue;
+    }
+
+    visible += char;
+    originalIndexes.push(index);
+    index += 1;
+  }
+  return { visible, originalIndexes };
+}
+
+type TerminalVisiblePathRange = {
+  visibleEnd: number;
+  visiblePath: string;
+  visibleStart: number;
+};
+
+type TerminalTextPathRange = {
+  end: number;
+  path: string;
+  start: number;
+};
+
+function addTerminalVisiblePathRange(
+  ranges: TerminalVisiblePathRange[],
+  originalIndexes: number[],
+  visibleStart: number,
+  visiblePath: string,
+) {
+  if (!visiblePath) {
+    return;
+  }
+  const visibleEnd = visibleStart + visiblePath.length;
+  if (
+    !Number.isSafeInteger(visibleStart) ||
+    !Number.isSafeInteger(visibleEnd) ||
+    originalIndexes[visibleStart] == null ||
+    originalIndexes[visibleEnd - 1] == null ||
+    visibleEnd <= visibleStart
+  ) {
+    return;
+  }
+  ranges.push({ visibleStart, visibleEnd, visiblePath });
+}
+
+function mergeTerminalVisiblePathRanges(ranges: TerminalVisiblePathRange[]) {
+  const sorted = [...ranges].sort((left, right) =>
+    left.visibleStart === right.visibleStart
+      ? right.visibleEnd - left.visibleEnd
+      : left.visibleStart - right.visibleStart,
+  );
+  const merged: TerminalVisiblePathRange[] = [];
+  for (const range of sorted) {
+    const previous = merged.at(-1);
+    if (!previous || range.visibleStart >= previous.visibleEnd) {
+      merged.push({ ...range });
+      continue;
+    }
+    if (range.visibleEnd > previous.visibleEnd) {
+      previous.visibleEnd = range.visibleEnd;
+      if (range.visiblePath.length > previous.visiblePath.length) {
+        previous.visiblePath = range.visiblePath;
+      }
+    }
+  }
+  return merged;
+}
+
+function addTerminalTextPathRange(
+  ranges: TerminalTextPathRange[],
+  start: number,
+  path: string,
+) {
+  const end = start + path.length;
+  if (!path || !Number.isSafeInteger(start) || !Number.isSafeInteger(end) || end <= start) {
+    return;
+  }
+  ranges.push({ start, end, path });
+}
+
+function collectTerminalTextPathMatches(
+  ranges: TerminalTextPathRange[],
+  text: string,
+  pattern: RegExp,
+) {
+  pattern.lastIndex = 0;
+  for (const match of text.matchAll(pattern)) {
+    const pathToken = match[2];
+    if (!pathToken || match.index == null) {
+      continue;
+    }
+    const pathOffset = match[0].lastIndexOf(pathToken);
+    if (pathOffset < 0) {
+      continue;
+    }
+    addTerminalTextPathRange(ranges, match.index + pathOffset, pathToken);
+  }
+}
+
+function collectTerminalExactAliasTextMatches(
+  ranges: TerminalTextPathRange[],
+  text: string,
+  alias: string,
+) {
+  const aliasPattern = new RegExp(
+    `${terminalVisiblePrivatePathPrefixSource}(${escapeRegExp(alias)})${terminalPrivatePathBoundarySource}`,
+    'g',
+  );
+  aliasPattern.lastIndex = 0;
+  for (const match of text.matchAll(aliasPattern)) {
+    const pathToken = match[2];
+    if (!pathToken || match.index == null) {
+      continue;
+    }
+    const pathOffset = match[0].lastIndexOf(pathToken);
+    if (pathOffset < 0) {
+      continue;
+    }
+    addTerminalTextPathRange(ranges, match.index + pathOffset, pathToken);
+  }
+}
+
+function collectTerminalCodexStatusPathFragmentTextMatches(
+  ranges: TerminalTextPathRange[],
+  text: string,
+) {
+  terminalCodexStatusTrailingPathFragmentPattern.lastIndex = 0;
+  const match = terminalCodexStatusTrailingPathFragmentPattern.exec(text);
+  const pathToken = match?.[1];
+  if (!pathToken || match?.index == null) {
+    return;
+  }
+  const pathOffset = match[0].lastIndexOf(pathToken);
+  if (pathOffset < 0) {
+    return;
+  }
+  addTerminalTextPathRange(ranges, match.index + pathOffset, pathToken);
+}
+
+function mergeTerminalTextPathRanges(ranges: TerminalTextPathRange[]) {
+  const sorted = [...ranges].sort((left, right) =>
+    left.start === right.start ? right.end - left.end : left.start - right.start,
+  );
+  const merged: TerminalTextPathRange[] = [];
+  for (const range of sorted) {
+    const previous = merged.at(-1);
+    if (!previous || range.start >= previous.end) {
+      merged.push({ ...range });
+      continue;
+    }
+    if (range.end > previous.end) {
+      previous.end = range.end;
+      if (range.path.length > previous.path.length) {
+        previous.path = range.path;
+      }
+    }
+  }
+  return merged;
+}
+
+function collectTerminalPrivatePathTextRanges(text: string, cwd: string) {
+  const ranges: TerminalTextPathRange[] = [];
+  collectTerminalTextPathMatches(ranges, text, terminalHomeRelativePathPattern);
+  collectTerminalTextPathMatches(ranges, text, terminalAbsoluteHomePathPattern);
+  if (cwd) {
+    for (const alias of getTerminalPrivatePathAliases(cwd)) {
+      collectTerminalExactAliasTextMatches(ranges, text, alias);
+    }
+  }
+  collectTerminalCodexStatusPathFragmentTextMatches(ranges, text);
+  return mergeTerminalTextPathRanges(ranges);
+}
+
+function maskTerminalControlSequencePrivatePaths(sequence: string, cwd: string) {
+  if (!sequence.startsWith('\x1b]')) {
+    return sequence;
+  }
+
+  const terminatorLength = sequence.endsWith('\x1b\\') ? 2 : sequence.endsWith('\x07') ? 1 : 0;
+  const bodyEnd = terminatorLength ? sequence.length - terminatorLength : sequence.length;
+  const body = sequence.slice(2, bodyEnd);
+  if (!body) {
+    return sequence;
+  }
+
+  const maskedBody = maskTerminalPrivatePaths(body, cwd);
+  if (maskedBody === body) {
+    return sequence;
+  }
+  return `${sequence.slice(0, 2)}${maskedBody}${sequence.slice(bodyEnd)}`;
+}
+
+function maskTerminalVisiblePrivatePaths(data: string, cwd: string) {
+  const { visible, originalIndexes } = getTerminalVisibleTextMap(data);
+  if (!visible || originalIndexes.length === 0) {
+    return data;
+  }
+
+  const ranges: TerminalVisiblePathRange[] = [];
+  for (const range of collectTerminalPrivatePathTextRanges(visible, cwd)) {
+    addTerminalVisiblePathRange(ranges, originalIndexes, range.start, range.path);
+  }
+
+  const merged = mergeTerminalVisiblePathRanges(ranges);
+  if (merged.length === 0) {
+    return data;
+  }
+
+  const replacementByOriginalIndex = new Map<number, string>();
+  for (const range of merged) {
+    const maskText = maskTerminalPathToken('', range.visiblePath);
+    for (let visibleIndex = range.visibleStart; visibleIndex < range.visibleEnd; visibleIndex += 1) {
+      const originalIndex = originalIndexes[visibleIndex];
+      const maskIndex = visibleIndex - range.visibleStart;
+      if (originalIndex != null && maskIndex < maskText.length) {
+        replacementByOriginalIndex.set(originalIndex, maskText[maskIndex]);
+      }
+    }
+  }
+
+  let masked = '';
+  let index = 0;
+  while (index < data.length) {
+    const ansiLength = getTerminalAnsiSequenceLengthAt(data, index);
+    if (ansiLength > 0) {
+      masked += maskTerminalControlSequencePrivatePaths(data.slice(index, index + ansiLength), cwd);
+      index += ansiLength;
+      continue;
+    }
+
+    const replacement = replacementByOriginalIndex.get(index);
+    masked += replacement ?? data[index];
+    index += 1;
+  }
+  return masked;
+}
+
+function appendTerminalCodexStatusTail(tail: string, data: string) {
+  const combined = `${tail}${getTerminalPathMatchingText(data)}`;
+  return combined.slice(-terminalCodexStatusTailMaxChars);
+}
+
+function endsWithTerminalCodexStatusPathLead(data: string) {
+  terminalCodexStatusPathLeadPattern.lastIndex = 0;
+  return terminalCodexStatusPathLeadPattern.test(getTerminalPathMatchingText(data));
+}
+
+function extractTerminalPrivatePathCandidates(data: string, cwd: string) {
+  const statusPaths = extractTerminalStatusPrivatePathCandidates(data, cwd);
+  if (statusPaths.length > 0) {
+    return statusPaths;
+  }
+
+  const paths: string[] = [];
+  collectTerminalPathMatches(paths, data, terminalHomeRelativePathPattern, cwd);
+  collectTerminalPathMatches(paths, data, terminalAbsoluteHomePathPattern, cwd);
+  return paths;
+}
+
+function extractTerminalStatusPrivatePathCandidates(data: string, cwd: string) {
+  const statusPaths: string[] = [];
+  collectTerminalPathMatches(statusPaths, data, terminalStatusPrivatePathPattern, cwd);
+  return statusPaths;
+}
+
+function extractTerminalCodexStatusPrivatePathCandidates(data: string, cwd: string) {
+  const plain = getTerminalPathMatchingText(data);
+  const paths: string[] = [];
+  terminalCodexStatusPrivatePathPattern.lastIndex = 0;
+  for (const match of plain.matchAll(terminalCodexStatusPrivatePathPattern)) {
+    const pathToken = match[1];
+    if (pathToken) {
+      paths.push(expandTerminalHomePath(pathToken, cwd));
+    }
+  }
+  return paths;
+}
+
+function extractTerminalLeadingPrivatePathCandidates(data: string, cwd: string) {
+  const paths: string[] = [];
+  collectTerminalPathMatches(paths, data, terminalLeadingPrivatePathPattern, cwd);
+  return paths;
+}
+
+function extractTerminalCodexStatusTrailingPathFragment(data: string) {
+  const plain = getTerminalPathMatchingText(data);
+  const match = plain.match(terminalCodexStatusTrailingPathFragmentPattern);
+  return match?.[1] ?? '';
+}
+
+function extractTerminalLeadingPathContinuationToken(data: string) {
+  terminalLeadingPathContinuationPattern.lastIndex = 0;
+  const match = terminalLeadingPathContinuationPattern.exec(data);
+  return match?.[2] ?? '';
+}
+
+function extractTerminalLeadingPathFragmentToken(data: string) {
+  terminalLeadingPathFragmentPattern.lastIndex = 0;
+  const match = terminalLeadingPathFragmentPattern.exec(data);
+  return match?.[2] ?? '';
+}
+
+function joinTerminalPathContinuation(pathPrefix: string, continuation: string) {
+  if (!pathPrefix || !continuation) {
+    return '';
+  }
+  return `${pathPrefix}${continuation}`;
+}
+
+function extractTerminalPathContinuationCandidates(
+  data: string,
+  cwd: string,
+  pathPrefix: string,
+) {
+  const continuation = extractTerminalLeadingPathContinuationToken(data);
+  const joined = joinTerminalPathContinuation(pathPrefix, continuation);
+  return joined ? [expandTerminalHomePath(joined, cwd)] : [];
+}
+
+function extractTerminalLeadingPathFragmentCandidates(data: string, cwd: string) {
+  const fragment = extractTerminalLeadingPathFragmentToken(data);
+  return fragment ? [expandTerminalHomePath(fragment, cwd)] : [];
+}
+
+function maskTerminalPrivatePaths(data: string, cwd: string) {
+  if (!data) {
+    return data;
+  }
+
+  let masked = maskTerminalVisiblePrivatePaths(data, cwd);
+  masked = masked.replace(
+    terminalHomeRelativePathPattern,
+    (_match: string, prefix: string, pathToken: string) =>
+      maskTerminalPathToken(prefix, pathToken),
+  );
+  masked = masked.replace(
+    terminalAbsoluteHomePathPattern,
+    (_match: string, prefix: string, pathToken: string) =>
+      maskTerminalPathToken(prefix, pathToken),
+  );
+  if (cwd) {
+    for (const alias of getTerminalPrivatePathAliases(cwd)) {
+      masked = maskExactTerminalPathAlias(masked, alias);
+    }
+  }
+  return masked;
+}
+
+function maskTerminalCodexStatusPrivatePaths(data: string) {
+  if (!data) {
+    return data;
+  }
+  terminalCodexStatusPrivatePathMaskPattern.lastIndex = 0;
+  return data.replace(
+    terminalCodexStatusPrivatePathMaskPattern,
+    (_match: string, prefix: string, pathToken: string) =>
+      maskTerminalPathToken(prefix, pathToken),
+  );
+}
+
+function maskTerminalLeadingPrivatePath(data: string) {
+  if (!data) {
+    return data;
+  }
+  terminalLeadingPrivatePathPattern.lastIndex = 0;
+  return data.replace(
+    terminalLeadingPrivatePathPattern,
+    (_match: string, prefix: string, pathToken: string) =>
+      maskTerminalPathToken(prefix, pathToken),
+  );
+}
+
+function maskTerminalLeadingPathContinuation(data: string) {
+  if (!data) {
+    return data;
+  }
+  terminalLeadingPathContinuationPattern.lastIndex = 0;
+  return data.replace(
+    terminalLeadingPathContinuationPattern,
+    (_match: string, prefix: string, pathToken: string) =>
+      maskTerminalPathToken(prefix, pathToken),
+  );
+}
+
+function maskTerminalLeadingPathFragment(data: string) {
+  if (!data) {
+    return data;
+  }
+  terminalLeadingPathFragmentPattern.lastIndex = 0;
+  return data.replace(
+    terminalLeadingPathFragmentPattern,
+    (_match: string, prefix: string, pathToken: string) =>
+      maskTerminalPathToken(prefix, pathToken),
+  );
+}
+
+function hasTerminalCodexStatusPrivatePath(data: string, cwd: string) {
+  return extractTerminalCodexStatusPrivatePathCandidates(data, cwd).length > 0;
+}
+
+function maskTerminalRestoredPrivatePaths(
+  data: string,
+  cwd: string,
+  isCodexRoute: boolean,
+  privacyActive: boolean,
+) {
+  if (!data) {
+    return data;
+  }
+  const hasCodexStatusPath = hasTerminalCodexStatusPrivatePath(data, cwd);
+  if (!hasCodexStatusPath && !privacyActive && !isCodexRoute) {
+    return data;
+  }
+  return maskTerminalPrivatePaths(data, cwd);
 }
 
 function createInputClientId() {
@@ -656,6 +1262,8 @@ export default function CodexCliRoute() {
   const eventClientIdRef = useRef<string | null>(null);
   const transportRef = useRef<TerminalTransport | null>(null);
   const activeSessionIdRef = useRef<string | null>(null);
+  const terminalCwdRef = useRef('');
+  const terminalCwdFromOutputRef = useRef(false);
   const inputStreamRef = useRef<HttpInputStream | null>(null);
   const inputStreamDisabledRef = useRef(false);
   const inputStreamRetryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -689,9 +1297,13 @@ export default function CodexCliRoute() {
   const terminalOutputBufferRef = useRef('');
   const terminalOutputAckBytesRef = useRef(0);
   const terminalOutputSeqRef = useRef(0);
+  const terminalOutputPrivacyRefreshRef = useRef(false);
+  const terminalCodexStatusTailRef = useRef('');
+  const terminalCodexStatusPathPrefixRef = useRef('');
   const appliedOutputSeqRef = useRef(0);
   const terminalOutputFrameRef = useRef(0);
   const terminalOutputTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const terminalPrivacyRefreshFrameRef = useRef(0);
   const outputAckTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pendingOutputAckBytesRef = useRef(0);
   const sendOutputAckRef = useRef<(bytes: number) => void>(() => undefined);
@@ -707,8 +1319,17 @@ export default function CodexCliRoute() {
   const hasExitedRef = useRef(false);
   const [reconnectNonce, setReconnectNonce] = useState(0);
   const [exitInfo, setExitInfo] = useState<TerminalExitInfo | null>(null);
+  const [terminalCwd, setTerminalCwd] = useState('');
+  const [cwdReveal, setCwdReveal] = useState(false);
 
   const terminalMode: TerminalMode = location.pathname.startsWith('/codex') ? 'codex' : 'shell';
+  const [terminalCwdPrivacyActive, setTerminalCwdPrivacyActive] = useState(
+    () => terminalMode === 'codex',
+  );
+  const terminalModeRef = useRef<TerminalMode>(terminalMode);
+  terminalModeRef.current = terminalMode;
+  const terminalCwdPrivacyActiveRef = useRef(terminalMode === 'codex');
+  const shouldHideTerminalCwd = terminalCwdPrivacyActive;
   const routePrefix = terminalMode === 'codex' ? 'codex' : 'terminal';
   const terminalDebugEnabled = useMemo(
     () => isTerminalDebugEnabled(location.search),
@@ -738,6 +1359,88 @@ export default function CodexCliRoute() {
   );
   const terminalDebugMetricsRef = useRef<TerminalDebugMetrics>(createTerminalDebugMetrics());
   const [terminalDebugSnapshot, setTerminalDebugSnapshot] = useState('');
+
+  const enableTerminalCwdPrivacy = useCallback(() => {
+    if (terminalCwdPrivacyActiveRef.current) {
+      return;
+    }
+    terminalCwdPrivacyActiveRef.current = true;
+    setTerminalCwdPrivacyActive(true);
+  }, []);
+
+  useEffect(() => {
+    const active = terminalMode === 'codex';
+    terminalCwdPrivacyActiveRef.current = active;
+    setTerminalCwdPrivacyActive(active);
+    if (!active) {
+      setCwdReveal(false);
+    }
+  }, [terminalMode]);
+
+  const rememberTerminalCwd = useCallback((cwd?: string, source: 'session' | 'output' = 'session') => {
+    if (!cwd || typeof cwd !== 'string') {
+      return;
+    }
+    const normalizedCwd = normalizeTerminalPath(cwd);
+    if (!normalizedCwd) {
+      return;
+    }
+    rememberPrivatePathAliases(normalizedCwd);
+    if (!terminalCwdPrivacyActiveRef.current) {
+      if (source === 'session') {
+        terminalCwdRef.current = normalizedCwd;
+      }
+      return;
+    }
+    if (source !== 'output' && terminalCwdFromOutputRef.current && terminalCwdRef.current) {
+      return;
+    }
+    if (source === 'output') {
+      terminalCwdFromOutputRef.current = true;
+    }
+    if (terminalCwdRef.current === normalizedCwd) {
+      return;
+    }
+    terminalCwdRef.current = normalizedCwd;
+    setTerminalCwd(normalizedCwd);
+  }, []);
+
+  const rememberTerminalOutputPaths = useCallback(
+    (data: string, codexStatusPathsOverride?: string[]) => {
+      const cwd = terminalCwdRef.current;
+      const codexStatusPaths =
+        codexStatusPathsOverride ?? extractTerminalCodexStatusPrivatePathCandidates(data, cwd);
+      if (codexStatusPaths.length > 0) {
+        enableTerminalCwdPrivacy();
+      }
+      if (!terminalCwdPrivacyActiveRef.current) {
+        return;
+      }
+      const paths =
+        codexStatusPaths.length > 0
+          ? codexStatusPaths
+          : extractTerminalPrivatePathCandidates(data, cwd);
+      const latestPath = paths.at(-1);
+      if (latestPath) {
+        rememberTerminalCwd(latestPath, 'output');
+      }
+    },
+    [enableTerminalCwdPrivacy, rememberTerminalCwd],
+  );
+
+  const scheduleTerminalPrivacyRefresh = useCallback(() => {
+    if (terminalPrivacyRefreshFrameRef.current) {
+      return;
+    }
+    terminalPrivacyRefreshFrameRef.current = window.requestAnimationFrame(() => {
+      terminalPrivacyRefreshFrameRef.current = 0;
+      const terminal = terminalRef.current;
+      if (!terminal) {
+        return;
+      }
+      refreshTerminalGlyphs(terminal);
+    });
+  }, []);
 
   const activeSessionId = useMemo(() => {
     if (isValidSessionId(sessionId)) {
@@ -928,13 +1631,19 @@ export default function CodexCliRoute() {
 
   const writeTerminalOutput = useCallback((data: string, callback?: () => void) => {
     const terminal = terminalRef.current;
-    if (!terminal || !data) {
+    const shouldMaskWriteData =
+      terminalModeRef.current === 'codex' || terminalCwdPrivacyActiveRef.current;
+    const outputData = shouldMaskWriteData
+      ? maskTerminalPrivatePaths(data, terminalCwdRef.current)
+      : data;
+    const needsPrivacyRefresh = shouldMaskWriteData && outputData !== data;
+    if (!terminal || !outputData) {
       callback?.();
       return;
     }
 
     if (terminalWriteInFlightRef.current) {
-      terminalWritePendingRef.current += data;
+      terminalWritePendingRef.current += outputData;
       terminalDebugMetricsRef.current.currentTerminalWritePendingChars =
         terminalWritePendingRef.current.length;
       if (callback) {
@@ -957,12 +1666,15 @@ export default function CodexCliRoute() {
 
     const generation = terminalWriteGenerationRef.current;
     terminalWriteInFlightRef.current = true;
-    writeTerminalData(terminal, data, () => {
+    writeTerminalData(terminal, outputData, () => {
       if (terminalWriteGenerationRef.current !== generation) {
         callback?.();
         return;
       }
       terminalWriteInFlightRef.current = false;
+      if (needsPrivacyRefresh) {
+        scheduleTerminalPrivacyRefresh();
+      }
       callback?.();
       const pending = terminalWritePendingRef.current;
       const pendingCallbacks = terminalWritePendingCallbacksRef.current;
@@ -979,7 +1691,7 @@ export default function CodexCliRoute() {
         }, 0);
       }
     });
-  }, []);
+  }, [scheduleTerminalPrivacyRefresh]);
 
   writeTerminalOutputRef.current = writeTerminalOutput;
 
@@ -988,19 +1700,24 @@ export default function CodexCliRoute() {
     const data = terminalOutputBufferRef.current;
     const ackBytes = terminalOutputAckBytesRef.current;
     const outputSeq = terminalOutputSeqRef.current;
+    const needsPrivacyRefresh = terminalOutputPrivacyRefreshRef.current;
     terminalOutputBufferRef.current = '';
     terminalOutputAckBytesRef.current = 0;
     terminalOutputSeqRef.current = 0;
+    terminalOutputPrivacyRefreshRef.current = false;
     if (!data) {
       afterFlush?.();
       return;
     }
     writeTerminalOutputRef.current(data, () => {
+      if (needsPrivacyRefresh) {
+        scheduleTerminalPrivacyRefresh();
+      }
       markOutputApplied(outputSeq);
       sendOutputAckRef.current(ackBytes || getTerminalOutputBytes(data));
       afterFlush?.();
     });
-  }, [cancelQueuedTerminalOutput, markOutputApplied]);
+  }, [cancelQueuedTerminalOutput, markOutputApplied, scheduleTerminalPrivacyRefresh]);
 
   const scheduleQueuedTerminalOutput = useCallback(() => {
     if (terminalOutputFrameRef.current || terminalOutputTimerRef.current) {
@@ -1021,14 +1738,66 @@ export default function CodexCliRoute() {
         return;
       }
       const outputSeq = typeof seq === 'number' && Number.isSafeInteger(seq) ? seq : 0;
+      const isCodexRoute = terminalModeRef.current === 'codex';
+      const cwd = terminalCwdRef.current;
+      const statusTail = terminalCodexStatusTailRef.current;
+      const statusPathPrefix = terminalCodexStatusPathPrefixRef.current;
+      const codexStatusPaths = extractTerminalCodexStatusPrivatePathCandidates(data, cwd);
+      const codexStatusPathFragment = extractTerminalCodexStatusTrailingPathFragment(data);
+      const splitCodexStatusPaths = endsWithTerminalCodexStatusPathLead(statusTail)
+        ? extractTerminalLeadingPrivatePathCandidates(data, cwd)
+        : [];
+      const splitCodexStatusPathFragments = endsWithTerminalCodexStatusPathLead(statusTail)
+        ? extractTerminalLeadingPathFragmentCandidates(data, cwd)
+        : [];
+      const statusContinuationPaths = statusPathPrefix
+        ? extractTerminalPathContinuationCandidates(data, cwd, statusPathPrefix)
+        : [];
+      const hasSplitCodexStatusPath =
+        splitCodexStatusPaths.length > 0 || splitCodexStatusPathFragments.length > 0;
+      const hasStatusContinuationPath = statusContinuationPaths.length > 0;
+      const hasCodexStatusPath =
+        codexStatusPaths.length > 0 ||
+        !!codexStatusPathFragment ||
+        hasSplitCodexStatusPath ||
+        hasStatusContinuationPath;
+      const shouldHideOutput =
+        hasCodexStatusPath || isCodexRoute || terminalCwdPrivacyActiveRef.current;
+      if (shouldHideOutput) {
+        rememberTerminalOutputPaths(data, [
+          ...codexStatusPaths,
+          ...splitCodexStatusPaths,
+          ...statusContinuationPaths,
+        ]);
+      }
+      let maskedData = shouldHideOutput ? maskTerminalPrivatePaths(data, cwd) : data;
+      if (shouldHideOutput && hasStatusContinuationPath) {
+        maskedData = maskTerminalLeadingPathContinuation(maskedData);
+      } else if (shouldHideOutput && splitCodexStatusPathFragments.length > 0) {
+        maskedData = maskTerminalLeadingPathFragment(maskedData);
+      } else if (shouldHideOutput && splitCodexStatusPaths.length > 0) {
+        maskedData = maskTerminalLeadingPrivatePath(maskedData);
+      } else if (shouldHideOutput && !isCodexRoute && !terminalCwdPrivacyActiveRef.current) {
+        maskedData = maskTerminalCodexStatusPrivatePaths(maskedData);
+      }
+      const nextStatusTail = appendTerminalCodexStatusTail(statusTail, data);
+      terminalCodexStatusTailRef.current = nextStatusTail;
+      terminalCodexStatusPathPrefixRef.current =
+        extractTerminalCodexStatusTrailingPathFragment(nextStatusTail);
+      const needsPrivacyRefresh = shouldHideOutput && maskedData !== data;
       if (typeof document !== 'undefined' && document.hidden) {
-        terminalOutputBufferRef.current += data;
+        terminalOutputBufferRef.current += maskedData;
         terminalOutputAckBytesRef.current += getTerminalOutputBytes(data);
         terminalOutputSeqRef.current = Math.max(terminalOutputSeqRef.current, outputSeq);
+        terminalOutputPrivacyRefreshRef.current =
+          terminalOutputPrivacyRefreshRef.current || needsPrivacyRefresh;
         if (terminalOutputBufferRef.current.length > terminalHiddenBacklogMaxChars) {
           terminalOutputBufferRef.current = '';
           terminalOutputAckBytesRef.current = 0;
           terminalOutputSeqRef.current = 0;
+          terminalOutputPrivacyRefreshRef.current = false;
+          terminalCodexStatusTailRef.current = '';
+          terminalCodexStatusPathPrefixRef.current = '';
           resetBeforeReplayRef.current = true;
           reconnectOnVisibleRef.current = true;
           pendingOutputAckBytesRef.current = 0;
@@ -1046,29 +1815,41 @@ export default function CodexCliRoute() {
       }
       if (
         !terminalOutputBufferRef.current &&
-        data.length <= terminalLiveDirectWriteChars &&
+        maskedData.length <= terminalLiveDirectWriteChars &&
         Date.now() - lastDirectTerminalWriteAtRef.current >= terminalLiveDirectWriteMinIntervalMs
       ) {
         const terminal = terminalRef.current;
         if (terminal) {
           lastDirectTerminalWriteAtRef.current = Date.now();
-          writeTerminalOutputRef.current(data, () => {
+          writeTerminalOutputRef.current(maskedData, () => {
+            if (needsPrivacyRefresh) {
+              scheduleTerminalPrivacyRefresh();
+            }
             markOutputApplied(outputSeq);
             sendOutputAckRef.current(getTerminalOutputBytes(data));
           });
           return;
         }
       }
-      terminalOutputBufferRef.current += data;
+      terminalOutputBufferRef.current += maskedData;
       terminalOutputAckBytesRef.current += getTerminalOutputBytes(data);
       terminalOutputSeqRef.current = Math.max(terminalOutputSeqRef.current, outputSeq);
+      terminalOutputPrivacyRefreshRef.current =
+        terminalOutputPrivacyRefreshRef.current || needsPrivacyRefresh;
       if (terminalOutputBufferRef.current.length >= terminalLiveWriteFlushChars) {
         scheduleQueuedTerminalOutput();
         return;
       }
       scheduleQueuedTerminalOutput();
     },
-    [closeInputStream, flushQueuedTerminalOutput, markOutputApplied, scheduleQueuedTerminalOutput],
+    [
+      closeInputStream,
+      flushQueuedTerminalOutput,
+      markOutputApplied,
+      rememberTerminalOutputPaths,
+      scheduleQueuedTerminalOutput,
+      scheduleTerminalPrivacyRefresh,
+    ],
   );
 
   const clearQueuedTerminalOutput = useCallback(() => {
@@ -1076,6 +1857,7 @@ export default function CodexCliRoute() {
     terminalOutputBufferRef.current = '';
     terminalOutputAckBytesRef.current = 0;
     terminalOutputSeqRef.current = 0;
+    terminalOutputPrivacyRefreshRef.current = false;
   }, [cancelQueuedTerminalOutput]);
 
   const getTerminalSnapshotKey = useCallback(() => {
@@ -1111,6 +1893,12 @@ export default function CodexCliRoute() {
       if (data.length > terminalSnapshotMaxBytes) {
         data = serializeAddon.serialize({ scrollback: 0 });
       }
+      data = maskTerminalRestoredPrivatePaths(
+        data,
+        terminalCwdRef.current,
+        terminalModeRef.current === 'codex',
+        terminalCwdPrivacyActiveRef.current,
+      );
       if (!data) {
         return;
       }
@@ -1170,8 +1958,19 @@ export default function CodexCliRoute() {
     try {
       const viewportSnapshot = captureTerminalViewport(terminal);
       resetTerminalWriteQueue();
+      terminalCodexStatusTailRef.current = '';
+      terminalCodexStatusPathPrefixRef.current = '';
       terminal.reset();
-      writeTerminalOutputRef.current(snapshot.data, () => {
+      const maskedSnapshotData = maskTerminalRestoredPrivatePaths(
+        snapshot.data,
+        terminalCwdRef.current,
+        terminalModeRef.current === 'codex',
+        terminalCwdPrivacyActiveRef.current,
+      );
+      writeTerminalOutputRef.current(maskedSnapshotData, () => {
+        if (maskedSnapshotData !== snapshot.data) {
+          scheduleTerminalPrivacyRefresh();
+        }
         terminal.refresh(0, Math.max(0, terminal.rows - 1));
         restoreTerminalViewport(terminal, viewportSnapshot);
       });
@@ -1179,7 +1978,7 @@ export default function CodexCliRoute() {
     } catch {
       return false;
     }
-  }, [getTerminalSnapshotKey, resetTerminalWriteQueue]);
+  }, [getTerminalSnapshotKey, resetTerminalWriteQueue, scheduleTerminalPrivacyRefresh]);
 
   const recoverBlankTerminal = useCallback(() => {
     const terminal = terminalRef.current;
@@ -1373,7 +2172,7 @@ export default function CodexCliRoute() {
       return;
     }
     lastReconnectNoticeAtRef.current = now;
-    terminalRef.current?.writeln(message);
+    writeTerminalOutputRef.current(message);
   }, []);
 
   const requestReconnect = useCallback(() => {
@@ -1724,6 +2523,8 @@ export default function CodexCliRoute() {
     reconnectCounter.current += 1;
     closeTransports();
     hasExitedRef.current = false;
+    terminalCodexStatusTailRef.current = '';
+    terminalCodexStatusPathPrefixRef.current = '';
     setExitInfo(null);
 
     const createSession = async () => {
@@ -1735,11 +2536,15 @@ export default function CodexCliRoute() {
         if (cancelled) {
           return;
         }
+        if (session.mode === 'codex') {
+          enableTerminalCwdPrivacy();
+        }
+        rememberTerminalCwd(session.cwd);
         navigate(`/${routePrefix}/${session.sessionId}`, { replace: true });
       } catch {
         if (!cancelled) {
           pendingSessionCreateRef.current = null;
-          terminalRef.current?.writeln('\r\n[web terminal] failed to create terminal session\r\n');
+          writeTerminalOutputRef.current('\r\n[web terminal] failed to create terminal session\r\n');
         }
       }
     };
@@ -1752,9 +2557,11 @@ export default function CodexCliRoute() {
   }, [
     activeSessionId,
     closeTransports,
+    enableTerminalCwdPrivacy,
     isAuthenticated,
     navigate,
     routePrefix,
+    rememberTerminalCwd,
     terminalMode,
     token,
   ]);
@@ -1776,6 +2583,8 @@ export default function CodexCliRoute() {
     lastSessionIdRef.current = terminalKey;
     appliedOutputSeqRef.current = 0;
     terminalOutputSeqRef.current = 0;
+    terminalCodexStatusTailRef.current = '';
+    terminalCodexStatusPathPrefixRef.current = '';
     inputClientIdRef.current = createInputClientId();
     nextInputSeqRef.current = 1;
     pendingInputChunksRef.current = [];
@@ -1783,6 +2592,10 @@ export default function CodexCliRoute() {
     inputPostInFlightRef.current = false;
     pendingReconnectInputRef.current = '';
     hasExitedRef.current = false;
+    terminalCwdRef.current = '';
+    terminalCwdFromOutputRef.current = false;
+    setTerminalCwd('');
+    setCwdReveal(false);
     setExitInfo(null);
     terminalRef.current?.reset();
   }, [activeSessionId, closeTransports, terminalMode]);
@@ -1838,6 +2651,10 @@ export default function CodexCliRoute() {
       if (connectionId !== reconnectCounter.current) {
         return;
       }
+      if (message.mode === 'codex') {
+        enableTerminalCwdPrivacy();
+      }
+      rememberTerminalCwd(message.cwd);
 
       if (message.type === 'replay') {
         const replayData = message.data ?? '';
@@ -1849,22 +2666,43 @@ export default function CodexCliRoute() {
         flushPendingReconnectInput();
         clearQueuedTerminalOutput();
         resetTerminalWriteQueue();
+        terminalCodexStatusTailRef.current = '';
+        terminalCodexStatusPathPrefixRef.current = '';
         terminal.reset();
         resetBeforeReplayRef.current = false;
         if (!terminalReplayEnabledRef.current) {
           markOutputApplied(message.seq);
           sendOutputAckRef.current(getTerminalOutputBytes(replayData));
-          terminal.writeln('[terminal replay skipped]');
-          fitAndNotify();
-          terminal.refresh(0, Math.max(0, terminal.rows - 1));
-          terminalSnapshotRef.current = null;
-          if (snapshotClearTimerRef.current) {
-            clearTimeout(snapshotClearTimerRef.current);
-            snapshotClearTimerRef.current = null;
-          }
+          writeTerminalOutputRef.current('[terminal replay skipped]\r\n', () => {
+            fitAndNotify();
+            terminal.refresh(0, Math.max(0, terminal.rows - 1));
+            terminalSnapshotRef.current = null;
+            if (snapshotClearTimerRef.current) {
+              clearTimeout(snapshotClearTimerRef.current);
+              snapshotClearTimerRef.current = null;
+            }
+          });
           return;
         }
-        writeTerminalOutputRef.current(replayData, () => {
+        const isCodexRoute = terminalModeRef.current === 'codex';
+        const cwd = terminalCwdRef.current;
+        const replayHasCodexStatusPath = hasTerminalCodexStatusPrivatePath(replayData, cwd);
+        const shouldHideReplay =
+          replayHasCodexStatusPath || isCodexRoute || terminalCwdPrivacyActiveRef.current;
+        if (shouldHideReplay) {
+          rememberTerminalOutputPaths(replayData);
+        }
+        const maskedReplayData = maskTerminalRestoredPrivatePaths(
+          replayData,
+          cwd,
+          isCodexRoute,
+          terminalCwdPrivacyActiveRef.current,
+        );
+        const replayNeedsPrivacyRefresh = shouldHideReplay && maskedReplayData !== replayData;
+        writeTerminalOutputRef.current(maskedReplayData, () => {
+          if (replayNeedsPrivacyRefresh) {
+            scheduleTerminalPrivacyRefresh();
+          }
           markOutputApplied(message.seq);
           sendOutputAckRef.current(getTerminalOutputBytes(replayData));
           fitAndNotify();
@@ -1892,6 +2730,8 @@ export default function CodexCliRoute() {
           const viewportSnapshot = captureTerminalViewport(terminal);
           clearQueuedTerminalOutput();
           resetTerminalWriteQueue();
+          terminalCodexStatusTailRef.current = '';
+          terminalCodexStatusPathPrefixRef.current = '';
           terminal.reset();
           resetBeforeReplayRef.current = false;
           restoreTerminalViewport(terminal, viewportSnapshot);
@@ -1911,7 +2751,7 @@ export default function CodexCliRoute() {
         if (gotDifferentSession || gotDifferentMode) {
           hasExitedRef.current = true;
           connectedRef.current = false;
-          terminal.writeln(
+          writeTerminalOutputRef.current(
             [
               '\r\n[web terminal] session identity mismatch; connection closed',
               `expected ${terminalMode}:${activeSessionId}`,
@@ -1949,8 +2789,9 @@ export default function CodexCliRoute() {
           exitCode: message.exitCode,
           signal: message.signal,
         });
-        flushQueuedTerminalOutput();
-        terminal.writeln('\r\n[terminal exited]\r\n');
+        flushQueuedTerminalOutput(() => {
+          writeTerminalOutputRef.current('\r\n[terminal exited]\r\n');
+        });
         closeCurrentTransport();
       }
     };
@@ -2214,8 +3055,12 @@ export default function CodexCliRoute() {
     isAuthenticated,
     markOutputApplied,
     queueTerminalOutput,
+    enableTerminalCwdPrivacy,
+    rememberTerminalCwd,
+    rememberTerminalOutputPaths,
     requestReconnect,
     resetTerminalWriteQueue,
+    scheduleTerminalPrivacyRefresh,
     startHttpInputStream,
     terminalMode,
     token,
@@ -2226,6 +3071,39 @@ export default function CodexCliRoute() {
   const openFreshTerminal = useCallback(() => {
     navigate(createTerminalSessionPath(terminalMode, transportPreference));
   }, [navigate, terminalMode, transportPreference]);
+
+  useEffect(() => {
+    if (!shouldHideTerminalCwd) {
+      setCwdReveal(false);
+      return;
+    }
+    const revealCwd = (event: KeyboardEvent) => {
+      if (event.key !== terminalCwdRevealKey || !terminalCwdRef.current) {
+        return;
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      setCwdReveal(true);
+    };
+    const concealCwd = (event?: KeyboardEvent) => {
+      if (event && event.key !== terminalCwdRevealKey) {
+        return;
+      }
+      event?.preventDefault();
+      event?.stopPropagation();
+      setCwdReveal(false);
+    };
+    const concealCwdOnBlur = () => setCwdReveal(false);
+
+    window.addEventListener('keydown', revealCwd, true);
+    window.addEventListener('keyup', concealCwd, true);
+    window.addEventListener('blur', concealCwdOnBlur);
+    return () => {
+      window.removeEventListener('keydown', revealCwd, true);
+      window.removeEventListener('keyup', concealCwd, true);
+      window.removeEventListener('blur', concealCwdOnBlur);
+    };
+  }, [shouldHideTerminalCwd]);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -2334,6 +3212,10 @@ export default function CodexCliRoute() {
       if (snapshotClearTimerRef.current) {
         clearTimeout(snapshotClearTimerRef.current);
         snapshotClearTimerRef.current = null;
+      }
+      if (terminalPrivacyRefreshFrameRef.current) {
+        window.cancelAnimationFrame(terminalPrivacyRefreshFrameRef.current);
+        terminalPrivacyRefreshFrameRef.current = 0;
       }
       terminalSnapshotRef.current = null;
       terminal.dispose();
@@ -2493,6 +3375,38 @@ export default function CodexCliRoute() {
       <section className="min-h-0 flex-1 overflow-hidden" onClick={() => terminalRef.current?.focus()}>
         <div ref={containerRef} className="codex-cli-terminal h-full w-full" />
       </section>
+      {shouldHideTerminalCwd && terminalCwd && (
+        <div className="pointer-events-none fixed right-3 top-3 z-40 flex max-w-[calc(100vw-24px)] flex-col items-end gap-2">
+          <button
+            type="button"
+            aria-label={`Hold ${terminalCwdRevealKey} to show current directory`}
+            aria-pressed={cwdReveal}
+            title={`Hold ${terminalCwdRevealKey} to show current directory`}
+            onMouseDown={(event) => {
+              event.preventDefault();
+              setCwdReveal(true);
+            }}
+            onMouseUp={() => setCwdReveal(false)}
+            onMouseLeave={() => setCwdReveal(false)}
+            onTouchStart={(event) => {
+              event.preventDefault();
+              setCwdReveal(true);
+            }}
+            onTouchEnd={() => setCwdReveal(false)}
+            onTouchCancel={() => setCwdReveal(false)}
+            onClick={(event) => event.preventDefault()}
+            className="pointer-events-auto inline-flex h-7 items-center gap-1.5 rounded-md border border-[#d9d9dc] bg-[rgba(250,250,250,0.82)] px-2 text-[11px] font-medium leading-none text-[#4b4f58] shadow-sm backdrop-blur-sm transition-colors hover:border-[#b8bbc3] hover:bg-[rgba(250,250,250,0.95)] focus:outline-none focus-visible:ring-2 focus-visible:ring-[#4078f2]"
+          >
+            <Eye className="h-3.5 w-3.5" aria-hidden="true" />
+            <span className="font-mono">{terminalCwdRevealKey}</span>
+          </button>
+          {cwdReveal && (
+            <div className="pointer-events-auto max-w-[min(720px,calc(100vw-24px))] overflow-x-auto rounded-md border border-[#d9d9dc] bg-[rgba(250,250,250,0.96)] px-3 py-2 font-mono text-[12px] leading-5 text-[#202227] shadow-lg">
+              {terminalCwd}
+            </div>
+          )}
+        </div>
+      )}
       {terminalDebugEnabled && terminalDebugSnapshot && (
         <pre className="pointer-events-none fixed right-3 top-3 z-50 max-w-[min(420px,calc(100vw-24px))] whitespace-pre-wrap rounded-md border border-[#d9d9dc] bg-[rgba(250,250,250,0.92)] px-3 py-2 font-mono text-[11px] leading-4 text-[#202227] shadow-lg">
           {terminalDebugSnapshot}
