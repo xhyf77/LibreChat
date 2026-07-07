@@ -1,7 +1,12 @@
 import { __terminalPrivacyTestUtils } from './CodexCliRoute';
 
-const { getTerminalOutputPathPrivacyUpdate, maskTerminalRestoredPrivatePaths } =
-  __terminalPrivacyTestUtils;
+const {
+  getTerminalCodexStatusRevealText,
+  getTerminalOutputPathPrivacyUpdate,
+  hasTerminalCodexStatusLine,
+  hideTerminalCodexStatusLines,
+  maskTerminalRestoredPrivatePaths,
+} = __terminalPrivacyTestUtils;
 
 describe('CodexCliRoute terminal cwd privacy', () => {
   const cwd = '/home/xieminhui/fjj/hm_os/hongmeng/hm-verif-kernel';
@@ -53,5 +58,29 @@ describe('CodexCliRoute terminal cwd privacy', () => {
     expect(masked).toContain('[cwd hidden]');
     expect(masked).not.toContain('~/fjj/hm_os/hongmeng/hm-verif-kernel');
     expect(masked).not.toContain('hm-verif-kernel');
+  });
+
+  test('hides the whole Codex status line after masking cwd', () => {
+    const raw = 'gpt-5.5 xhigh fast · ~/fjj/hm_os/hongmeng/hm-verif-kernel';
+    const masked = maskTerminalRestoredPrivatePaths(raw, cwd, false, false);
+    const hidden = hideTerminalCodexStatusLines(masked);
+
+    expect(hidden).not.toContain('gpt-5.5');
+    expect(hidden).not.toContain('xhigh');
+    expect(hidden).not.toContain('[cwd hidden]');
+    expect(hidden).toHaveLength(masked.length);
+  });
+
+  test('hides status lines already redacted by the backend', () => {
+    const redacted = 'gpt-5.5 xhigh fast · [cwd hidden]........................';
+
+    expect(hasTerminalCodexStatusLine(redacted)).toBe(true);
+    expect(hideTerminalCodexStatusLines(redacted)).not.toContain('gpt-5.5');
+  });
+
+  test('uses the hidden status line as the F2 reveal text', () => {
+    const redacted = 'gpt-5.5 xhigh fast · [cwd hidden]........................';
+
+    expect(getTerminalCodexStatusRevealText(redacted, cwd)).toBe(`gpt-5.5 xhigh fast · ${cwd}`);
   });
 });
