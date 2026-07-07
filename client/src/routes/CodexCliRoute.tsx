@@ -378,7 +378,7 @@ function stripTerminalAnsiSequences(data: string) {
 }
 
 function getTerminalPathMatchingText(data: string) {
-  return stripTerminalAnsiSequences(data).replace(/[\x00-\x1f\x7f]+/g, '');
+  return stripTerminalAnsiSequences(data).replace(/[\x00-\x1f\x7f]+/g, ' ');
 }
 
 function getTerminalAnsiSequenceLengthAt(data: string, index: number) {
@@ -3435,6 +3435,8 @@ export default function CodexCliRoute() {
         activeSessionIdRef.current &&
         !hasExitedRef.current
       ) {
+        resetBeforeReplayRef.current = true;
+        reconnectOnVisibleRef.current = true;
         resetTerminalRenderer();
       }
       cancelPendingSnapshot();

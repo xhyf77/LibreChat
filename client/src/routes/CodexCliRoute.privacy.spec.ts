@@ -45,4 +45,13 @@ describe('CodexCliRoute terminal cwd privacy', () => {
     expect(masked).not.toContain(cwd);
     expect(masked).not.toContain('tailcall.c');
   });
+
+  test('masks shell replay status cwd after terminal line controls', () => {
+    const raw = '$ codex\r\ngpt-5.5 xhigh fast · ~/fjj/hm_os/hongmeng/hm-verif-kernel';
+    const masked = maskTerminalRestoredPrivatePaths(raw, cwd, false, false);
+
+    expect(masked).toContain('[cwd hidden]');
+    expect(masked).not.toContain('~/fjj/hm_os/hongmeng/hm-verif-kernel');
+    expect(masked).not.toContain('hm-verif-kernel');
+  });
 });

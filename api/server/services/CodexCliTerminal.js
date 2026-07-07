@@ -49,8 +49,11 @@ const TERMINAL_CODEX_STATUS_SEPARATOR_CHARS = '·•∙';
 const TERMINAL_CODEX_STATUS_SEPARATOR_SOURCE = `[${TERMINAL_CODEX_STATUS_SEPARATOR_CHARS}]`;
 const TERMINAL_ANSI_SEQUENCE_SOURCE =
   '\\x1b(?:\\[[0-?]*[ -/]*[@-~]|\\][^\\x07]*(?:\\x07|\\x1b\\\\)|.)';
+const terminalAnsiSequenceAtPattern = new RegExp(`^(?:${TERMINAL_ANSI_SEQUENCE_SOURCE})`);
 const TERMINAL_PRIVATE_PATH_PREFIX_SOURCE =
   `(^|[\\s${TERMINAL_CODEX_STATUS_SEPARATOR_CHARS}"'\\\`([{<:=,;，。；：](?:${TERMINAL_ANSI_SEQUENCE_SOURCE})*)`;
+const TERMINAL_VISIBLE_PRIVATE_PATH_PREFIX_SOURCE =
+  `(^|[\\s${TERMINAL_CODEX_STATUS_SEPARATOR_CHARS}"'\\\`([{<:=,;，。；：])`;
 const TERMINAL_PRIVATE_PATH_BOUNDARY_SOURCE = `(?=$|[/\\s"'\\\`)\\]}>:;,，。；：])`;
 const TERMINAL_HOME_RELATIVE_PATH_TOKEN_SOURCE = '~\\/[^\\s"\'`\\)\\]}>\\x1b]+';
 const TERMINAL_ABSOLUTE_HOME_PATH_TOKEN_SOURCE =
@@ -370,7 +373,7 @@ function stripTerminalAnsiSequences(data) {
 }
 
 function getTerminalPathMatchingText(data) {
-  return stripTerminalAnsiSequences(data).replace(/[\x00-\x1f\x7f]+/g, '');
+  return stripTerminalAnsiSequences(data).replace(/[\x00-\x1f\x7f]+/g, ' ');
 }
 
 function collectTerminalPathMatches(paths, data, pattern, cwd) {
@@ -381,6 +384,238 @@ function collectTerminalPathMatches(paths, data, pattern, cwd) {
       paths.push(expandTerminalHomePath(pathToken, cwd));
     }
   }
+}
+
+function getTerminalAnsiSequenceLengthAt(data, index) {
+  if (data.charCodeAt(index) !== 0x1b) {
+    return 0;
+  }
+  const match = terminalAnsiSequenceAtPattern.exec(data.slice(index));
+  return match?.[0]?.length ?? 1;
+}
+
+function getTerminalVisibleTextMap(data) {
+  let visible = '';
+  const originalIndexes = [];
+  let index = 0;
+  while (index < data.length) {
+    const ansiLength = getTerminalAnsiSequenceLengthAt(data, index);
+    if (ansiLength > 0) {
+      index += ansiLength;
+      continue;
+    }
+
+    const char = data[index];
+    const charCode = char.charCodeAt(0);
+    if (charCode < 0x20 || charCode === 0x7f) {
+      index += 1;
+      continue;
+    }
+
+    visible += char;
+    originalIndexes.push(index);
+    index += 1;
+  }
+  return { visible, originalIndexes };
+}
+
+function addTerminalTextPathRange(ranges, start, pathValue) {
+  const end = start + pathValue.length;
+  if (!pathValue || !Number.isSafeInteger(start) || !Number.isSafeInteger(end) || end <= start) {
+    return;
+  }
+  ranges.push({ start, end, path: pathValue });
+}
+
+function collectTerminalTextPathMatches(ranges, text, pattern) {
+  pattern.lastIndex = 0;
+  for (const match of text.matchAll(pattern)) {
+    const pathToken = match[2];
+    if (!pathToken || match.index == null) {
+      continue;
+    }
+    const pathOffset = match[0].lastIndexOf(pathToken);
+    if (pathOffset < 0) {
+      continue;
+    }
+    addTerminalTextPathRange(ranges, match.index + pathOffset, pathToken);
+  }
+}
+
+function collectTerminalExactAliasTextMatches(ranges, text, alias) {
+  const aliasPattern = new RegExp(
+    `${TERMINAL_VISIBLE_PRIVATE_PATH_PREFIX_SOURCE}(${escapeRegExp(alias)})${TERMINAL_PRIVATE_PATH_BOUNDARY_SOURCE}`,
+    'g',
+  );
+  aliasPattern.lastIndex = 0;
+  for (const match of text.matchAll(aliasPattern)) {
+    const pathToken = match[2];
+    if (!pathToken || match.index == null) {
+      continue;
+    }
+    const pathOffset = match[0].lastIndexOf(pathToken);
+    if (pathOffset < 0) {
+      continue;
+    }
+    addTerminalTextPathRange(ranges, match.index + pathOffset, pathToken);
+  }
+}
+
+function collectTerminalCodexStatusPathFragmentTextMatches(ranges, text) {
+  terminalCodexStatusTrailingPathFragmentPattern.lastIndex = 0;
+  const match = terminalCodexStatusTrailingPathFragmentPattern.exec(text);
+  const pathToken = match?.[1];
+  if (!pathToken || match?.index == null) {
+    return;
+  }
+  const pathOffset = match[0].lastIndexOf(pathToken);
+  if (pathOffset < 0) {
+    return;
+  }
+  addTerminalTextPathRange(ranges, match.index + pathOffset, pathToken);
+}
+
+function mergeTerminalTextPathRanges(ranges) {
+  const sorted = [...ranges].sort((left, right) =>
+    left.start === right.start ? right.end - left.end : left.start - right.start,
+  );
+  const merged = [];
+  for (const range of sorted) {
+    const previous = merged.at(-1);
+    if (!previous || range.start >= previous.end) {
+      merged.push({ ...range });
+      continue;
+    }
+    if (range.end > previous.end) {
+      previous.end = range.end;
+      if (range.path.length > previous.path.length) {
+        previous.path = range.path;
+      }
+    }
+  }
+  return merged;
+}
+
+function collectTerminalPrivatePathTextRanges(text, cwd, extraAliases = []) {
+  const ranges = [];
+  collectTerminalTextPathMatches(ranges, text, terminalHomeRelativePathPattern);
+  collectTerminalTextPathMatches(ranges, text, terminalAbsoluteHomePathPattern);
+  const aliases = new Set([...getTerminalPrivatePathAliases(cwd), ...extraAliases]);
+  for (const alias of aliases) {
+    if (alias) {
+      collectTerminalExactAliasTextMatches(ranges, text, alias);
+    }
+  }
+  collectTerminalCodexStatusPathFragmentTextMatches(ranges, text);
+  return mergeTerminalTextPathRanges(ranges);
+}
+
+function addTerminalVisiblePathRange(ranges, originalIndexes, visibleStart, visiblePath) {
+  if (!visiblePath) {
+    return;
+  }
+  const visibleEnd = visibleStart + visiblePath.length;
+  if (
+    !Number.isSafeInteger(visibleStart) ||
+    !Number.isSafeInteger(visibleEnd) ||
+    originalIndexes[visibleStart] == null ||
+    originalIndexes[visibleEnd - 1] == null ||
+    visibleEnd <= visibleStart
+  ) {
+    return;
+  }
+  ranges.push({ visibleStart, visibleEnd, visiblePath });
+}
+
+function mergeTerminalVisiblePathRanges(ranges) {
+  const sorted = [...ranges].sort((left, right) =>
+    left.visibleStart === right.visibleStart
+      ? right.visibleEnd - left.visibleEnd
+      : left.visibleStart - right.visibleStart,
+  );
+  const merged = [];
+  for (const range of sorted) {
+    const previous = merged.at(-1);
+    if (!previous || range.visibleStart >= previous.visibleEnd) {
+      merged.push({ ...range });
+      continue;
+    }
+    if (range.visibleEnd > previous.visibleEnd) {
+      previous.visibleEnd = range.visibleEnd;
+      if (range.visiblePath.length > previous.visiblePath.length) {
+        previous.visiblePath = range.visiblePath;
+      }
+    }
+  }
+  return merged;
+}
+
+function maskTerminalControlSequencePrivatePaths(sequence, cwd, extraAliases) {
+  if (!sequence.startsWith('\x1b]')) {
+    return sequence;
+  }
+
+  const terminatorLength = sequence.endsWith('\x1b\\') ? 2 : sequence.endsWith('\x07') ? 1 : 0;
+  const bodyEnd = terminatorLength ? sequence.length - terminatorLength : sequence.length;
+  const body = sequence.slice(2, bodyEnd);
+  if (!body) {
+    return sequence;
+  }
+
+  const maskedBody = maskTerminalPrivatePaths(body, cwd, extraAliases);
+  if (maskedBody === body) {
+    return sequence;
+  }
+  return `${sequence.slice(0, 2)}${maskedBody}${sequence.slice(bodyEnd)}`;
+}
+
+function maskTerminalVisiblePrivatePaths(data, cwd, extraAliases = []) {
+  const { visible, originalIndexes } = getTerminalVisibleTextMap(data);
+  if (!visible || originalIndexes.length === 0) {
+    return data;
+  }
+
+  const ranges = [];
+  for (const range of collectTerminalPrivatePathTextRanges(visible, cwd, extraAliases)) {
+    addTerminalVisiblePathRange(ranges, originalIndexes, range.start, range.path);
+  }
+
+  const merged = mergeTerminalVisiblePathRanges(ranges);
+  if (merged.length === 0) {
+    return data;
+  }
+
+  const replacementByOriginalIndex = new Map();
+  for (const range of merged) {
+    const maskText = maskTerminalPathToken('', range.visiblePath);
+    for (let visibleIndex = range.visibleStart; visibleIndex < range.visibleEnd; visibleIndex += 1) {
+      const originalIndex = originalIndexes[visibleIndex];
+      const maskIndex = visibleIndex - range.visibleStart;
+      if (originalIndex != null && maskIndex < maskText.length) {
+        replacementByOriginalIndex.set(originalIndex, maskText[maskIndex]);
+      }
+    }
+  }
+
+  let masked = '';
+  let index = 0;
+  while (index < data.length) {
+    const ansiLength = getTerminalAnsiSequenceLengthAt(data, index);
+    if (ansiLength > 0) {
+      masked += maskTerminalControlSequencePrivatePaths(
+        data.slice(index, index + ansiLength),
+        cwd,
+        extraAliases,
+      );
+      index += ansiLength;
+      continue;
+    }
+
+    const replacement = replacementByOriginalIndex.get(index);
+    masked += replacement ?? data[index];
+    index += 1;
+  }
+  return masked;
 }
 
 function extractTerminalCodexStatusPrivatePathCandidates(data, cwd) {
@@ -461,7 +696,8 @@ function maskTerminalPrivatePaths(data, cwd, extraAliases = []) {
     return data;
   }
 
-  let masked = data.replace(
+  let masked = maskTerminalVisiblePrivatePaths(data, cwd, extraAliases);
+  masked = masked.replace(
     terminalHomeRelativePathPattern,
     (_match, prefix, pathToken) => maskTerminalPathToken(prefix, pathToken),
   );
@@ -826,7 +1062,11 @@ class CodexCliSession {
   }
 
   queueLiveOutput(data, seq = this.replaySeq) {
-    if (!data || !this.hasLiveClients()) {
+    if (!data) {
+      return;
+    }
+    if (!this.hasLiveClients()) {
+      this.redactTerminalOutput(data);
       return;
     }
     if (!this.liveOutputBuffer && data.length <= LIVE_OUTPUT_IMMEDIATE_CHARS) {
@@ -1114,16 +1354,33 @@ class CodexCliSession {
     if (!first || first.seq > afterSeq + 1) {
       return null;
     }
-    const messages = [];
+    const records = [];
     for (const record of this.outputHistory) {
       if (record.seq > afterSeq) {
-        messages.push(this.redactTerminalMessage(
-          { type: 'data', data: record.data, seq: record.seq },
-          { stateless: true },
-        ));
+        records.push(record);
       }
     }
-    return messages.length > 0 ? messages : null;
+    if (records.length === 0) {
+      return null;
+    }
+
+    const joined = records.map((record) => record.data).join('');
+    const redacted = this.redactTerminalOutput(joined, { stateless: true });
+    if (redacted.length !== joined.length) {
+      return records.map((record) =>
+        this.redactTerminalMessage(
+          { type: 'data', data: record.data, seq: record.seq },
+          { stateless: true },
+        ),
+      );
+    }
+
+    let offset = 0;
+    return records.map((record) => {
+      const data = redacted.slice(offset, offset + record.data.length);
+      offset += record.data.length;
+      return { type: 'data', data, seq: record.seq };
+    });
   }
 
   startResumeOrReplay(client, send, close, afterSeq = 0, replayMode = 'full', options = {}) {
@@ -1219,12 +1476,12 @@ class CodexCliSession {
         if (!client.closed) {
           client.replaying = false;
           if (
-            send({
+            send(this.redactTerminalMessage({
               type: 'replay',
               data: trimUtf8Tail(this.buffer, options.maxReplayBytes ?? MAX_REPLAY_BYTES),
               seq: this.replaySeq,
               replayKind: 'raw-tail',
-            }) === false
+            }, { stateless: true })) === false
           ) {
             client.closed = true;
           }
@@ -2248,6 +2505,16 @@ module.exports = {
         },
         redact(data, options) {
           return redactor.redactTerminalOutput(data, options);
+        },
+        redactRecords(records) {
+          const joined = records.map((record) => record.data).join('');
+          const redacted = redactor.redactTerminalOutput(joined, { stateless: true });
+          let offset = 0;
+          return records.map((record) => {
+            const data = redacted.slice(offset, offset + record.data.length);
+            offset += record.data.length;
+            return { ...record, data };
+          });
         },
       };
     },
