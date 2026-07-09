@@ -138,9 +138,9 @@ const atomOneLightTheme = {
 const terminalFont =
   '"JetBrainsMono Nerd Font Mono", "JetBrains Mono", "Symbols Nerd Font Mono", "Roboto Mono", "SFMono-Regular", "SF Mono", "Cascadia Code", Menlo, Consolas, "Liberation Mono", monospace';
 const terminalFontSize = 14;
-const terminalScrollbackRows = 4000;
-const terminalSnapshotScrollbackRows = 400;
-const terminalSnapshotMaxBytes = 192 * 1024;
+const terminalScrollbackRows = 20000;
+const terminalSnapshotScrollbackRows = 2000;
+const terminalSnapshotMaxBytes = 1024 * 1024;
 const terminalSnapshotMinIntervalMs = 3000;
 const terminalSnapshotSlowMs = 120;
 const terminalSnapshotSlowBackoffMs = 15000;
